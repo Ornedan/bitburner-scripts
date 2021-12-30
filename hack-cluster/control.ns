@@ -1,0 +1,709 @@
+import { getServerGraph } from "/lib/deepscan.ns";
+import { log, tlog } from "/lib/logging.ns";
+import { startWorkers, workerCall } from "/lib/ns-cluster/controller.ns";
+import { HACK_CLUSTER_PORT } from "/lib/ports.js";
+import { getAvailableRam } from "/lib/ram.js";
+import { Ranges } from "/lib/ranges.ns";
+
+
+const SCRIPT_HACK = "/hack-cluster/hack.ns";
+const SCRIPT_GROW = "/hack-cluster/grow.ns";
+const SCRIPT_WEAK = "/hack-cluster/weak.ns";
+const SCRIPT_PREPARE = "/hack-cluster/prepare.ns";
+
+/** How much memory to leave unused on home server. */
+const HOME_RESERVE_MEM = 32;
+
+/** Maximum percent of money to try hacking from a server. */
+const MAX_HACK_PERCENT = 95;
+
+/** Maximum number of target servers we hack in parallel. */
+const MAX_TARGETS = 15;
+
+/**
+ * Do extra grows and weakens to compensate for operations sometimes occurring
+ * out of order. This lets us recover faster.
+ * 
+ * Also turn every Nth worker into a repair-worker.
+ */
+const EXTRA_GROW_FACTOR = 1.2;
+const EXTRA_WEAK_FACTOR = 1.3;
+const REPAIR_WORKER_INTERVAL = 10;
+
+/**
+ * It looks like a delayed action's finish time varies from expected. We give
+ * them a bit of a safety buffer before and after to try and ensure they happen
+ * in order.
+ */
+const OPERATION_UNCERTAINTY = 250;
+
+/** If a worker's initial aim is at least this much off, sleep to correct it. */
+const EXTRA_SLEEP_THRESHOLD = 50;
+
+/** Minimum safe length of time for a hack+weaken+grow+weaken set to finish in. */
+const SLICE_TIME = 8 * OPERATION_UNCERTAINTY;
+
+/** Target times for operations to finish in, offset from slice end time. */
+const SLICE_HACK_OFFSET = -7 * OPERATION_UNCERTAINTY;
+const SLICE_WEAH_OFFSET = -5 * OPERATION_UNCERTAINTY;
+const SLICE_GROW_OFFSET = -3 * OPERATION_UNCERTAINTY;
+const SLICE_WEAG_OFFSET = -1 * OPERATION_UNCERTAINTY;
+
+/**
+ * Based on calculations, hack+grow+weaken sets can be in flight at most 1/3rd
+ * of the time without beginnings or ends overlapping.
+ */
+const MAX_PACKING = 1 / 3;
+
+/** @param {NS} ns **/
+export async function main(ns) {
+    ns.disableLog("ALL");
+
+    while (true) {
+        const servers = ns.args.length > 0 ? ns.args : Object.keys(await getServerGraph(ns));
+
+        // 1. Calculate a configuration of targets and workers that makes
+        //    approximately the most money per second
+        const confs = await findBestConfiguration(ns, servers);
+
+        // 2. Deploy scripts to all workers
+        for (const conf of confs) {
+            await deployScripts(ns, conf.workerSpecs);
+        }
+
+        // 3. Start all workers, needs to happen sequentially because we await on
+        //    controller NS promises
+        const workerGroups = [];
+        for (const conf of confs) {
+            tlog(ns, "DEBUG",
+                "Running hacks on '%s' using %d workers of %dh, %dh-w, %dg, %dg-w. %.1f%%/worker, e%d$/s",
+                conf.target, conf.workerSpecs.length,
+                conf.workerSpecs[0].hack.threads, conf.workerSpecs[0].weaH.threads,
+                conf.workerSpecs[0].grow.threads, conf.workerSpecs[0].weaG.threads,
+                conf.hackFrac, conf.moneyPerSec);
+
+            try {
+                const workers =
+                    await startWorkers(ns, conf.workerSpecs.flatMap(spec => [spec.hack, spec.weaH, spec.grow, spec.weaG]));
+                workerGroups.push(workers);
+            } catch (error) {
+                for (const workerGroup of workerGroups)
+                    for (const worker of workerGroup)
+                        worker.quit();
+                throw error;
+            }
+        }
+
+        // 4. Run schedulers on each target concurrently
+        const schedulers = [];
+        for (let n = 0; n < confs.length; n++) {
+            const conf = confs[n];
+            const workers = workerGroups[n];
+
+            schedulers.push(schedulingLoop(ns, conf, workers));
+        }
+
+        // 5. Wait until all shcedulers have quit or one crashes
+        await Promise.all(schedulers);
+
+        // 6. If stop signal has been set, clear it and exit
+        if (ns.peek(HACK_CLUSTER_PORT) === true) {
+            ns.clear(HACK_CLUSTER_PORT);
+            return;
+        }
+
+        // 7. If we get here, it's because schedulers stopped on their own.
+        //    Which means hacking level change.
+        // 
+        // Wait a bit so worker scripts get cleaned up, then run preparation
+        // just in case we left some target server in an unprepared state
+        await ns.sleep(1000);
+        await ns.exec(SCRIPT_PREPARE, "home");
+        await ns.sleep(1000);
+
+        while (ns.isRunning(SCRIPT_PREPARE, "home"))
+            await ns.sleep(1000);
+    }
+}
+
+/** @param {NS} ns **/
+async function deployScripts(ns, workerSpecs) {
+    // TODO: don't copy same source->target several times
+    async function deploySpec(spec) {
+        if (spec.server !== "home")
+            await ns.scp(spec.script, "home", spec.server);
+    }
+
+    for (const worker of workerSpecs) {
+        await deploySpec(worker.hack);
+        await deploySpec(worker.weaH);
+        await deploySpec(worker.grow);
+        await deploySpec(worker.weaG);
+    }
+}
+
+/** @param {NS} ns **/
+async function schedulingLoop(ns, conf, workers) {
+    const { target, workerSpecs, hackFrac } = conf;
+    const hackingLevel0 = ns.getHackingLevel();
+
+    // 1. Sort the pre-started workers by role
+    const hacks = [];
+    const weaHs = [];
+    const grows = [];
+    const weaGs = [];
+
+    for (let i = 0; i < workerSpecs.length; i++) {
+        hacks[i] = workers[i * 4 + 0];
+        weaHs[i] = workers[i * 4 + 1];
+        grows[i] = workers[i * 4 + 2];
+        weaGs[i] = workers[i * 4 + 3];
+    }
+
+    const workerReady = [];
+    for (let i = 0; i < workerSpecs.length; i++)
+        workerReady.push(Promise.resolve());
+
+    // 2. Scheduling loop
+
+    const unsafeTimes = new Ranges();
+    let worker = 0;
+    let nextTargetTime0 = -Infinity;
+
+    try {
+        while (true) {
+            for (let worker = 0; worker < workerSpecs.length; worker++) {
+                // 2.1 Wait until next worker (hack + hack-weaken + grow + grow-weaken) is free
+
+                await workerReady[worker];
+
+                // 2.2 Calculate the earliest moment we can target the worker at
+                // 
+                // If we can, target right after the last previously scheduled set of actions
+                // ends. Otherwise scan ahead to next safe target time, where no operation
+                // starts at a time when security level might be above minimum
+                // (after hack or grow, before the corresponding weaken)
+
+// =============================== original line ===============================
+/**
+ *                 const hackTime = Math.round(ns.getHackTime(target) * 1000);
+ */
+// =============================================================================
+                //const hackTime = Math.round(((...a)=>ns.getHackTime(...a)/1000)(target) * 1000);
+                const hackTime = ns.getHackTime(target);
+// =============================== original line ===============================
+/**
+ *                 const growTime = Math.round(ns.getGrowTime(target) * 1000);
+ */
+// =============================================================================
+                //const growTime = Math.round(((...a)=>ns.getGrowTime(...a)/1000)(target) * 1000);
+                const growTime = ns.getGrowTime(target);
+// =============================== original line ===============================
+/**
+ *                 const weakTime = Math.round(ns.getWeakenTime(target) * 1000);
+ */
+// =============================================================================
+                //const weakTime = Math.round(((...a)=>ns.getWeakenTime(...a)/1000)(target) * 1000);
+                const weakTime = ns.getWeakenTime(target);
+                const targetTime0 =
+                    Math.max(nextTargetTime0 + SLICE_TIME, Math.ceil(performance.now() + weakTime + SLICE_TIME + 500));
+
+                let targetTime, hackTarget, weaHTarget, growTarget, weaGTarget;
+                let shift = 0;
+                while (true) {
+                    targetTime = targetTime0 + shift;
+                    hackTarget = targetTime + SLICE_HACK_OFFSET;
+                    weaHTarget = targetTime + SLICE_WEAH_OFFSET;
+                    growTarget = targetTime + SLICE_GROW_OFFSET;
+                    weaGTarget = targetTime + SLICE_WEAG_OFFSET;
+
+                    const hackStart = hackTarget - hackTime;
+                    const weaHStart = weaHTarget - weakTime;
+                    const growStart = growTarget - growTime;
+                    const weaGStart = weaGTarget - weakTime;
+                    const hackRange = [hackStart - OPERATION_UNCERTAINTY, hackStart + OPERATION_UNCERTAINTY];
+                    const weaHRange = [weaHStart - OPERATION_UNCERTAINTY, weaHStart + OPERATION_UNCERTAINTY];
+                    const growRange = [growStart - OPERATION_UNCERTAINTY, growStart + OPERATION_UNCERTAINTY];
+                    const weaGRange = [weaGStart - OPERATION_UNCERTAINTY, weaGStart + OPERATION_UNCERTAINTY];
+
+                    let extra;
+                    if ((extra = unsafeTimes.minimumAdvanceToAvoidOverlap(hackRange)) > 0) {
+                        shift += extra;
+                        continue;
+                    }
+                    if ((extra = unsafeTimes.minimumAdvanceToAvoidOverlap(weaHRange)) > 0) {
+                        shift += extra;
+                        continue;
+                    }
+                    if ((extra = unsafeTimes.minimumAdvanceToAvoidOverlap(growRange)) > 0) {
+                        shift += extra;
+                        continue;
+                    }
+                    if ((extra = unsafeTimes.minimumAdvanceToAvoidOverlap(weaGRange)) > 0) {
+                        shift += extra;
+                        continue;
+                    }
+                    break; // No overlaps detected anymore
+                }
+
+                // 2.3 Set the workers in motion
+
+                const dones = [false, false, false, false];
+
+                workerReady[worker] = Promise.all([
+                    hackDriver(ns, hacks[worker], target, hackTarget, hackingLevel0, hackFrac, dones),
+                    weakDriver(ns, weaHs[worker], target, weaHTarget, dones),
+                    growDriver(ns, grows[worker], target, growTarget, dones),
+                    weakDriver(ns, weaGs[worker], target, weaGTarget, dones),
+                ]);
+
+                // 2.4 Update bookkeeping
+
+                unsafeTimes.add([targetTime - SLICE_TIME, targetTime]);
+                unsafeTimes.cutBefore(Math.floor(performance.now()));
+
+                nextTargetTime0 = targetTime;
+            }
+
+            // 3.1 Has there been significant enough hacking level change that we
+            //     should restart?
+            if (ns.getHackingLevel() > Math.ceil(1.1 * hackingLevel0)) {
+                tlog(ns, "DEBUG", "Hacking level has changed, stopping scheduler on %s", target);
+                break;
+            }
+
+            // 3.2 Or has stop flag been set?
+            if (ns.peek(HACK_CLUSTER_PORT) === true) {
+                tlog(ns, "DEBUG", "Stop signal detected, stopping scheduler on %s", target);
+                break;
+            }
+        }
+
+        // 4. Wait until all in-flight workers have finished their work
+        await Promise.all(workerReady);
+
+        tlog(ns, "DEBUG", "Workers on %s finished, exiting scheduler", target);
+    } finally {
+        for (const worker of workers)
+            worker.quit();
+    }
+}
+
+/** @param {NS} ns **/
+async function hackDriver(ns, worker, target, end, hackingLevel0, hackFrac, dones) {
+    // Get awaitable promises from worker NS, do all other calls on controller NS
+
+    // 1. Initial wait
+// =============================== original line ===============================
+/**
+ *     const hackTime0 = Math.round(ns.getHackTime(target) * 1000);
+ */
+// =============================================================================
+    //const hackTime0 = Math.round(((...a)=>ns.getHackTime(...a)/1000)(target) * 1000);
+    const hackTime0 = ns.getHackTime(target);
+    const initialWait = end - performance.now() - hackTime0;
+    //tlog(ns, "DEBUG", "%s-%d@'%s' pre-op: initial wait: %d",
+    //    worker.spec.args[0], worker.spec.args[2], target, initialWait);
+    if (initialWait > 0)
+        await workerCall(worker, "sleep", initialWait);
+
+    // 2. Adjust for hacking level changes
+// =============================== original line ===============================
+/**
+ *     const hackTime1 = Math.round(ns.getHackTime(target) * 1000);
+ */
+// =============================================================================
+    //const hackTime1 = Math.round(((...a)=>ns.getHackTime(...a)/1000)(target) * 1000);
+    const hackTime1 = ns.getHackTime(target);
+    const extraWait = end - performance.now() - hackTime1;
+    //tlog(ns, "DEBUG", "%s-%d@'%s' pre-op: extra wait: %d",
+    //    worker.spec.args[0], worker.spec.args[2], target, extraWait);
+    if (extraWait > EXTRA_SLEEP_THRESHOLD)
+        await workerCall(worker, "sleep", extraWait);
+
+    let threads = worker.spec.threads;
+    if (hackingLevel0 != ns.getHackingLevel())
+// =============================== original line ===============================
+/**
+ *         threads = Math.min(threads, Math.floor(hackFrac / ns.hackAnalyzePercent(target)));
+ */
+// =============================================================================
+        threads = Math.min(threads, Math.floor(hackFrac / ((...a)=>ns.hackAnalyze(...a)*100)(target)));
+
+    // 3. Abort if money or security is not right
+    if (ns.getServerMoneyAvailable(target) < ns.getServerMaxMoney(target)) {
+        tlog(ns, "WARN", "%s-%d@'%s' pre-cond: not max-mon: %.1f",
+            worker.spec.args[0], worker.spec.args[2], target, ns.getServerMoneyAvailable(target));
+        return;
+    }
+    if (ns.getServerSecurityLevel(target) > ns.getServerMinSecurityLevel(target)) {
+        tlog(ns, "WARN", "%s-%d@'%s' pre-cond: not min-sec: %.1f",
+            worker.spec.args[0], worker.spec.args[2], target, ns.getServerSecurityLevel(target));
+        return;
+    }
+
+    // 4. Run the hack
+    //tlog(ns, "DEBUG", "%s-%d@'%s' pre-op, end - now - time: %d", worker.spec.args[0], worker.spec.args[2], target,
+// =============================== original line ===============================
+/**
+ *     //    end - performance.now() - Math.round(ns.getHackTime(target) * 1000));
+ */
+// =============================================================================
+    //    end - performance.now() - Math.round(((...a)=>ns.getHackTime(...a)/1000)(target) * 1000));
+    //    end - performance.now() - ns.getHackTime(target));
+    await workerCall(worker, "hack", target, { threads: threads });
+    //tlog(ns, "DEBUG", "%s-%d@'%s' post-op, end - now: %d", worker.spec.args[0], worker.spec.args[2], target,
+    //    end - performance.now());
+
+    dones[0] = true;
+    if (dones[1] || dones[2] || dones[3])
+        tlog(ns, "WARN", "%s-%d@'%s' out-of-order: %s", worker.spec.args[0], worker.spec.args[2], target, dones);
+}
+
+/** @param {NS} ns **/
+async function growDriver(ns, worker, target, end, dones) {
+    // 1. Initial wait
+// =============================== original line ===============================
+/**
+ *     const growTime0 = Math.round(ns.getGrowTime(target) * 1000);
+ */
+// =============================================================================
+    //const growTime0 = Math.round(((...a)=>ns.getGrowTime(...a)/1000)(target) * 1000);
+    const growTime0 = ns.getGrowTime(target);
+    const initialWait = end - performance.now() - growTime0;
+    //tlog(ns, "DEBUG", "%s-%d@'%s' pre-op: initial wait: %d",
+    //    worker.spec.args[0], worker.spec.args[2], target, initialWait);
+    if (initialWait > 0)
+        await workerCall(worker, "sleep", initialWait);
+
+    // 2. Adjust for hacking level changes
+// =============================== original line ===============================
+/**
+ *     const growTime1 = Math.round(ns.getGrowTime(target) * 1000);
+ */
+// =============================================================================
+    //const growTime1 = Math.round(((...a)=>ns.getGrowTime(...a)/1000)(target) * 1000);
+    const growTime1 = ns.getGrowTime(target);
+    const extraWait = end - performance.now() - growTime1;
+    //tlog(ns, "DEBUG", "%s-%d@'%s' pre-op: extra wait: %d",
+    //    worker.spec.args[0], worker.spec.args[2], target, extraWait);
+    if (extraWait > EXTRA_SLEEP_THRESHOLD)
+        await workerCall(worker, "sleep", extraWait);
+
+    // 3. Run the grow
+    if (ns.getServerSecurityLevel(target) > ns.getServerMinSecurityLevel(target)) {
+        tlog(ns, "WARN", "%s-%d@'%s' pre-cond: not min-sec: %.1f",
+            worker.spec.args[0], worker.spec.args[2], target, ns.getServerSecurityLevel(target));
+        return;
+    }
+
+    //tlog(ns, "DEBUG", "%s-%d@'%s' pre-op, end - now - time: %d", worker.spec.args[0], worker.spec.args[2], target,
+// =============================== original line ===============================
+/**
+ *     //    end - performance.now() - Math.round(ns.getGrowTime(target) * 1000));
+ */
+// =============================================================================
+    //    end - performance.now() - Math.round(((...a)=>ns.getGrowTime(...a)/1000)(target) * 1000));
+    //    end - performance.now() - ns.getGrowTime(target));
+    await workerCall(worker, "grow", target);
+    //tlog(ns, "DEBUG", "%s-%d@'%s' post-op, end - now: %d", worker.spec.args[0], worker.spec.args[2], target,
+    //    end - performance.now());
+
+    dones[2] = true;
+    if (!dones[0] || !dones[1] || dones[3])
+        tlog(ns, "WARN", "%s-%d@'%s' out-of-order: %s", worker.spec.args[0], worker.spec.args[2], target, dones);
+
+    if (ns.getServerMoneyAvailable(target) < ns.getServerMaxMoney(target))
+        tlog(ns, "WARN", "%s-%d@'%s' post-cond: not max-mon: %.1f",
+            worker.spec.args[0], worker.spec.args[2], target, ns.getServerMoneyAvailable(target));
+}
+
+/** @param {NS} ns **/
+async function weakDriver(ns, worker, target, end, dones, doneIx) {
+    // 1. Initial wait
+// =============================== original line ===============================
+/**
+ *     const weakTime0 = Math.round(ns.getWeakenTime(target) * 1000);
+ */
+// =============================================================================
+    //const weakTime0 = Math.round(((...a)=>ns.getWeakenTime(...a)/1000)(target) * 1000);
+    const weakTime0 = ns.getWeakenTime(target);
+    const initialWait = end - performance.now() - weakTime0;
+    //tlog(ns, "DEBUG", "%s-%d@'%s' pre-op: initial wait: %d",
+    //    worker.spec.args[0], worker.spec.args[2], target, initialWait);
+    if (initialWait > 0)
+        await workerCall(worker, "sleep", initialWait);
+
+    // 2. Adjust for hacking level changes
+// =============================== original line ===============================
+/**
+ *     const weakTime1 = Math.round(ns.getWeakenTime(target) * 1000);
+ */
+// =============================================================================
+    //const weakTime1 = Math.round(((...a)=>ns.getWeakenTime(...a)/1000)(target) * 1000);
+    const weakTime1 = ns.getWeakenTime(target);
+    const extraWait = end - performance.now() - weakTime1;
+    //tlog(ns, "DEBUG", "%s-%d@'%s' pre-op: extra wait: %d",
+    //    worker.spec.args[0], worker.spec.args[2], target, extraWait);
+    if (extraWait > EXTRA_SLEEP_THRESHOLD)
+        await workerCall(worker, "sleep", extraWait);
+
+    // 3. Run the weaken
+    if (ns.getServerSecurityLevel(target) > ns.getServerMinSecurityLevel(target))
+        tlog(ns, "WARN", "%s-%d@'%s' pre-cond: not min-sec: %.1f",
+            worker.spec.args[0], worker.spec.args[2], target, ns.getServerSecurityLevel(target));
+
+    //tlog(ns, "DEBUG", "%s-%d@'%s' pre-op, end - now - time: %d", worker.spec.args[0], worker.spec.args[2], target,
+// =============================== original line ===============================
+/**
+ *     //    end - performance.now() - Math.round(ns.getWeakenTime(target) * 1000));
+ */
+// =============================================================================
+    //    end - performance.now() - Math.round(((...a)=>ns.getWeakenTime(...a)/1000)(target) * 1000));
+    //    end - performance.now() - ns.getWeakenTime(target));
+    await workerCall(worker, "weaken", target);
+    //tlog(ns, "DEBUG", "%s-%d@'%s' post-op, end - now: %d", worker.spec.args[0], worker.spec.args[2], target,
+    //    end - performance.now());
+
+    if (worker.spec.args[0] == "weah") {
+        dones[1] = true;
+        if (!dones[0] || dones[2] || dones[3])
+            tlog(ns, "WARN", "%s-%d@'%s' out-of-order: %s", worker.spec.args[0], worker.spec.args[2], target, dones);
+    } else {
+        dones[3] = true;
+        if (!dones[0] || !dones[1] || !dones[2])
+            tlog(ns, "WARN", "%s-%d@'%s' out-of-order: %s", worker.spec.args[0], worker.spec.args[2], target, dones);
+    }
+
+    if (ns.getServerSecurityLevel(target) > ns.getServerMinSecurityLevel(target))
+        tlog(ns, "WARN", "%s-%d@'%s' post-cond: not min-sec: %.1f",
+            worker.spec.args[0], worker.spec.args[2], target, ns.getServerSecurityLevel(target));
+}
+
+/** @param {NS} ns **/
+async function findBestConfiguration(ns, servers) {
+    // Find the most money producing hacking configuration given total RAM available,
+    // then the second best given remaining RAM and so forth until we run out of
+    // targets or RAM.
+    // 
+    // This is kinda CPU-intensive, so break up the calculation with short sleeps
+    const confs = [];
+    let ram = getAvailableRam(ns);
+
+    // Skip targets we can't hack or that aren't prepared (min-sec, max-money)
+    servers = servers.filter(server =>
+        ns.hasRootAccess(server) &&
+        ns.hackAnalyze(server) > 0 &&
+        ns.getServerMaxMoney(server) > 0 &&
+        ns.getServerRequiredHackingLevel(server) <= ns.getHackingLevel() &&
+        ns.getServerSecurityLevel(server) <= ns.getServerMinSecurityLevel(server) &&
+        ns.getServerMoneyAvailable(server) >= ns.getServerMaxMoney(server));
+
+    // Skip targets where hacking time is too low, such that we can't interleave
+    // operations.
+    // TODO: these need a different kind of control scheme
+    servers = servers.filter(server => {
+// =============================== original line ===============================
+/**
+ *         const hackTime = Math.round(ns.getHackTime(server) * 1000);
+ */
+// =============================================================================
+        //const hackTime = Math.round(((...a)=>ns.getHackTime(...a)/1000)(server) * 1000);
+        const hackTime = ns.getHackTime(server);
+        if (hackTime < 4 * OPERATION_UNCERTAINTY) {
+            tlog(ns, "DEBUG", "Excluding %s from hacking targets, hack time is too low (%d msec)",
+                server, hackTime);
+            return false;
+        }
+        return true;
+    });
+
+    while (servers.length > 0 && confs.length < MAX_TARGETS) {
+        const conf = findBestRemainingConfiguration(ns, ram, servers);
+
+        if (conf.workerSpecs.length == 0)
+            break;
+
+        confs.push(conf);
+        ram = conf.ramRemain;
+
+        servers.splice(servers.indexOf(conf.target), 1);
+
+        await ns.sleep(10);
+    }
+
+    return confs;
+}
+
+/** @param {NS} ns **/
+function findBestRemainingConfiguration(ns, ram0, servers) {
+    // Find the hacking configuration with highest money per second among the target servers
+    // and limited to given amount of RAM.
+    const costs = {
+        hack: ns.getScriptRam(SCRIPT_HACK),
+        grow: ns.getScriptRam(SCRIPT_GROW),
+        weak: ns.getScriptRam(SCRIPT_WEAK),
+    };
+
+    let bestFit = null;
+
+    for (const target of servers) {
+// =============================== original line ===============================
+/**
+ *         const hackPercent = ns.hackAnalyzePercent(target);
+ */
+// =============================================================================
+        const hackPercent = ((...a)=>ns.hackAnalyze(...a)*100)(target);
+// =============================== original line ===============================
+/**
+ *         const hackChance = ns.hackChance(target);
+ */
+// =============================================================================
+        const hackChance = ns.hackAnalyzeChance(target);
+        const maxMoney = ns.getServerMaxMoney(target);
+// =============================== original line ===============================
+/**
+ *         const hackTime = Math.round(ns.getHackTime(target) * 1000);
+ */
+// =============================================================================
+        //const hackTime = Math.round(((...a)=>ns.getHackTime(...a)/1000)(target) * 1000);
+        const hackTime = ns.getHackTime(target);
+// =============================== original line ===============================
+/**
+ *         const growTime = Math.round(ns.getGrowTime(target) * 1000);
+ */
+// =============================================================================
+        //const growTime = Math.round(((...a)=>ns.getGrowTime(...a)/1000)(target) * 1000);
+        const growTime = ns.getGrowTime(target);
+// =============================== original line ===============================
+/**
+ *         const weakTime = Math.round(ns.getWeakenTime(target) * 1000);
+ */
+// =============================================================================
+        //const weakTime = Math.round(((...a)=>ns.getWeakenTime(...a)/1000)(target) * 1000);
+        const weakTime = ns.getWeakenTime(target);
+        const maxWorkers = Math.ceil(weakTime * MAX_PACKING / SLICE_TIME);
+
+        const serverFit = {
+            target: target,
+            workerSpecs: [],
+            moneyPerSec: 0,
+            hackFrac: 0,
+            ramRemain: ram0,
+        };
+
+        // At most 10000 search steps
+        const hacksIncrement = Math.max(1, Math.round(0.01 / hackPercent));
+        for (let hacks = 1; hacks * hackPercent < MAX_HACK_PERCENT; hacks += hacksIncrement) {
+            const hackWeaks = Math.ceil(EXTRA_WEAK_FACTOR * hacks / 25);
+            const grows = Math.ceil(EXTRA_GROW_FACTOR * ns.growthAnalyze(target, 100 / (100 - hacks * hackPercent)));
+            const growWeaks = Math.ceil(EXTRA_WEAK_FACTOR * grows / 12.5);
+
+            const ram = ram0.map(server => Object.assign({}, server)); // deep clone
+            const [workerSpecs, ramRemain] = getWorkerPacking(ns, ram, costs, target, maxWorkers,
+                hacks, hackWeaks, grows, growWeaks);
+
+            // Expected money per second with the workers of this size that we managed to fit in
+            const moneyPerSec = hacks * hackPercent * hackChance * maxMoney * workerSpecs.length / weakTime;
+
+            // Stop if we can't fit any workers of this size, the memory req ain't going down
+            if (workerSpecs.length < 1)
+                break;
+
+            //tlog(ns, "DEBUG", "'%s', h=%d h-w=%d g=%d h-w=%d * %d: %de$/s",
+            //     target, hacks, hackWeaks, grows, growWeaks, workerSpecs.length, moneyPerSec);
+
+            if (moneyPerSec > serverFit.moneyPerSec) {
+                serverFit.workerSpecs = workerSpecs;
+                serverFit.moneyPerSec = moneyPerSec;
+                serverFit.hackFrac = hacks * hackPercent;
+                serverFit.ramRemain = ramRemain;
+            }
+        }
+
+        if (!bestFit || serverFit.moneyPerSec > bestFit.moneyPerSec)
+            bestFit = serverFit;
+    }
+
+    //tlog(ns, "DEBUG", "Best fit: %s", JSON.stringify(bestFit));
+
+    return bestFit;
+}
+
+/** @param {NS} ns **/
+function getWorkerPacking(ns, ram, costs, target, maxWorkers, hacks, weaHs, grows, weaGs) {
+    const workerSpecs = [];
+
+    for (let n = 0; n < maxWorkers; n++) {
+        const repair = n > 0 && n % REPAIR_WORKER_INTERVAL == 0;
+
+        const workerSpec = allocateWorker(ram, costs, target, n,
+            repair ? 1 : hacks,
+            repair ? weaHs * 2 : weaHs,
+            repair ? grows * 2 : grows,
+            repair ? weaGs * 3 : weaGs);
+
+        // Couldn't fit this worker? Stop here
+        if (!workerSpec)
+            break;
+
+        workerSpecs.push(workerSpec);
+    }
+
+    return [workerSpecs, ram];
+}
+
+function allocateWorker(ram, costs, target, n, hacks, weaHs, grows, weaGs) {
+    // The scripts are given superfluous disambiguating arguments, because in some cases
+    // Bitburner identifies scripts by their argument string representation rather than
+    // object identity.
+    // 
+    // Round script memory costs up to full integers - the calculations here don't match
+    // the game exactly and it's better to overestimate used memory than under-.
+
+    const hackRam = Math.ceil(costs.hack * hacks);
+    const weaHRam = Math.ceil(costs.weak * weaHs);
+    const growRam = Math.ceil(costs.grow * grows);
+    const weaGRam = Math.ceil(costs.weak * weaGs);
+
+    let hackWorker, weaHWorker, growWorker, weaGWorker;
+
+    for (const server of ram) {
+        if (server.free >= hackRam) {
+            hackWorker = { script: SCRIPT_HACK, server: server.sid, threads: hacks, args: ["hack", target, n] };
+            server.free -= hackRam;
+            break;
+        }
+    }
+    for (const server of ram) {
+        if (server.free >= weaHRam) {
+            weaHWorker = { script: SCRIPT_WEAK, server: server.sid, threads: weaHs, args: ["weah", target, n] };
+            server.free -= weaHRam;
+            break;
+        }
+    }
+    for (const server of ram) {
+        if (server.free >= growRam) {
+            growWorker = { script: SCRIPT_GROW, server: server.sid, threads: grows, args: ["grow", target, n] };
+            server.free -= growRam;
+            break;
+        }
+    }
+    for (const server of ram) {
+        if (server.free >= weaGRam) {
+            weaGWorker = { script: SCRIPT_WEAK, server: server.sid, threads: weaGs, args: ["weag", target, n] };
+            server.free -= weaGRam;
+            break;
+        }
+    }
+
+    if (!hackWorker || !weaHWorker || !growWorker || !weaGWorker)
+        return null;
+
+    return {
+        hack: hackWorker,
+        weaH: weaHWorker,
+        grow: growWorker,
+        weaG: weaGWorker,
+    };
+}

@@ -1,0 +1,224 @@
+import { getServerGraph } from "/lib/deepscan.ns";
+import { log, tlog } from "/lib/logging.ns";
+import { startWorkers, workerCall } from "/lib/ns-cluster/controller.ns";
+import { promise } from "/lib/promise.ns";
+import { getAvailableRam } from "/lib/ram.js";
+
+const SCRIPT_GROW = "/hack-cluster/grow.ns";
+const SCRIPT_WEAK = "/hack-cluster/weak.ns";
+
+/** @param {NS} ns **/
+export async function main(ns) {
+    const targets = getPreparableServers(ns, ns.args);
+
+    if (targets.length == 0)
+        tlog(ns, "INFO", "No root-accessible servers need preparing");
+
+    while (targets.length > 0) {
+        // 1. Start as many workers as we can fit in total RAM
+        const ram = getAvailableRam(ns);
+        const workerSpecss = {};
+
+        for (const target of targets) {
+            const workerSpecs = calculateWorkers(ns, ram, target,
+                ns.getServerMinSecurityLevel(target), ns.getServerSecurityLevel(target),
+                ns.getServerMaxMoney(target), ns.getServerMoneyAvailable(target));
+
+            if (!workerSpecs)
+                break;
+
+            workerSpecss[target] = workerSpecs;
+        }
+
+        if (Object.keys(workerSpecss).length == 0)
+            throw new Error("Insufficient memory to run any preparation");
+
+        // 2. Deploy scripts
+        await deployScripts(ns, Object.values(workerSpecss).flat(2));
+
+        // 3. Start the workers sequentially
+        const crashP = promise();
+        const workerPs = [];
+        for (const target in workerSpecss) {
+            const growTime = ns.getGrowTime(target);
+            const weakTime = ns.getWeakenTime(target);
+
+            const workers = await startWorkerSet(ns, target, workerSpecss[target]);
+
+            workerPs.push(driveWorkers(crashP, target, workers, growTime, weakTime));
+        }
+
+        // 4. Wait until they're all finished
+        // 
+        // TODO: start replacement workers as soon as any finish, rather than waiting for all
+        try {
+            await Promise.all(workerPs);
+        } catch (error) {
+            crashP.reject(error);
+            throw error;
+        }
+
+        // 5. Discard targets that are done
+        for (let n = targets.length - 1; n >= 0; n--) {
+            const target = targets[n];
+            const minSec = ns.getServerMinSecurityLevel(target);
+            const curSec = ns.getServerSecurityLevel(target);
+            const maxMon = ns.getServerMaxMoney(target);
+            const curMon = ns.getServerMoneyAvailable(target);
+
+            if (curSec <= minSec && curMon >= maxMon) {
+                tlog(ns, "INFO", "Target server '%s' is prepared: money %d/%d, security %.1f/%.1f",
+                    targets[n], curMon, maxMon, curSec, minSec);
+                targets.splice(n, 1);
+            }
+        }
+
+        // 6. Wait until worker scripts are (hopefully) dead
+        await ns.sleep(10 * 1000);
+    }
+}
+
+/** @param {NS} ns @param {String[]} initial **/
+function getPreparableServers(ns, initial) {
+    // Non-owned servers
+    const servers = (initial.length > 0 ? initial : Object.keys(getServerGraph(ns)))
+        .filter(server => server != "home" && ns.getPurchasedServers().indexOf(server) < 0);
+
+    // Process by difficulty class, starting from easiest
+    servers.sort((sid1, sid2) => {
+        return ns.getServerNumPortsRequired(sid1) - ns.getServerNumPortsRequired(sid2);
+    });
+
+    const targets = [];
+    for (const server of servers) {
+        // Run preparations on targets that
+        // - we have root access to
+        // - are hackable with current skill level
+        // - are not already at min-sec and max-money
+        if (ns.hasRootAccess(server) &&
+            ns.getServerRequiredHackingLevel(server) <= ns.getHackingLevel() &&
+            (ns.getServerSecurityLevel(server) > ns.getServerMinSecurityLevel(server) ||
+                ns.getServerMoneyAvailable(server) < ns.getServerMaxMoney(server)))
+            targets.push(server);
+    }
+
+    return targets;
+}
+
+async function deployScripts(ns, specs) {
+    const serverScripts = {};
+
+    for (const spec of specs) {
+        if (spec.server !== "home") {
+            if (!serverScripts[spec.server])
+                serverScripts[spec.server] = {};
+            serverScripts[spec.server][spec.script] = true;
+        }
+    }
+
+    for (const server in serverScripts)
+        for (const script in serverScripts[server])
+            await ns.scp(script, "home", server);
+
+}
+
+async function startWorkerSet(ns, target, workerSpecs) {
+    const minSec = ns.getServerMinSecurityLevel(target);
+    const maxMon = ns.getServerMaxMoney(target);
+    const curSec = ns.getServerSecurityLevel(target);
+    const curMon = ns.getServerMoneyAvailable(target);
+    const [growSpecs, weakSpecs] = workerSpecs;
+
+    tlog(ns, "INFO", "Target server '%s' needs preparing: money %d/%d, security %.1f/%.1f",
+        target, curMon, maxMon, curSec, minSec);
+
+    // Start workers, in one step for error handling purposes
+    const workers = await startWorkers(ns, [].concat(growSpecs, weakSpecs));
+
+    const growWorkers = workers.slice(0, growSpecs.length);
+    const weakWorkers = workers.slice(growSpecs.length);
+
+    return [growWorkers, weakWorkers];
+}
+
+async function driveWorkers(crashP, target, workers, growTime, weakTime) {
+    // No calls to controller NS in here, so as to avoid potentially
+    const [growWorkers, weakWorkers] = workers;
+
+    try {
+        const waitTime = weakWorkers.length > 0 ? (weakTime - growTime - 100) : 0;
+        const weakPs = [];
+        const growPs = [];
+
+        // Start the actions
+        for (const worker of weakWorkers)
+            weakPs.push(workerCall(worker, "weaken", target));
+        for (const worker of growWorkers)
+            weakPs.push(growDriver(worker, target, waitTime));
+
+        // Wait for all
+        await Promise.race([Promise.all([].concat(weakPs, growPs)), crashP]);
+    } finally {
+        for (const worker of growWorkers)
+            worker.quit();
+        for (const worker of weakWorkers)
+            worker.quit();
+    }
+}
+
+async function growDriver(worker, target, waitTime) {
+    if (waitTime > 0)
+        await workerCall(worker, "sleep", waitTime);
+
+    await workerCall(worker, "grow", target);
+}
+
+function calculateWorkers(ns, ram, target, minSec, curSec, maxMon, curMon) {
+    const growRam = ns.getScriptRam(SCRIPT_GROW);
+    const weakRam = ns.getScriptRam(SCRIPT_WEAK);
+
+    const growWorkers = {};
+    const weakWorkers = {};
+
+    // 1. First weaken to minimum security
+    let baseWeaks = Math.ceil((curSec - minSec) / 0.05);
+    for (const server of ram) {
+        const fit = Math.min(baseWeaks, Math.floor(server.free / weakRam));
+        if (fit > 0) {
+            weakWorkers[server.sid] = { script: SCRIPT_WEAK, server: server.sid, threads: fit, args: ["prep", target] };
+            server.free -= fit * weakRam;
+            baseWeaks -= fit;
+        }
+    }
+
+    // 2. Add up to as many grows as needed
+    const growsNeeded0 = Math.ceil(ns.growthAnalyze(target, maxMon / Math.max(1, curMon)));
+    let growsNeeded = growsNeeded0;
+    for (const server of ram) {
+        const fit = Math.min(growsNeeded, Math.floor(server.free / growRam));
+        if (fit > 0) {
+            growWorkers[server.sid] = { script: SCRIPT_GROW, server: server.sid, threads: fit, args: ["prep", target] };
+            server.free -= fit * growRam;
+            growsNeeded -= fit;
+        }
+    }
+
+    // 3. Add up to as many weakens as needed to compensate for the grows
+    let growWeaks = Math.ceil((growsNeeded0 - growsNeeded) / 12.5);
+    for (const server of ram) {
+        const fit = Math.min(growWeaks, Math.floor(server.free / weakRam));
+        if (fit > 0) {
+            if (!weakWorkers[server.sid])
+                weakWorkers[server.sid] = { script: SCRIPT_WEAK, server: server.sid, threads: 0, args: ["prep", target] };
+            weakWorkers[server.sid].threads += fit;
+            server.free -= fit * weakRam;
+            growWeaks -= fit;
+        }
+    }
+
+    // 4. Return false-y if we can fit nothing at all
+    if (Object.keys(growWorkers).length == 0 && Object.keys(weakWorkers).length == 0)
+        return null;
+
+    return [Object.values(growWorkers), Object.values(weakWorkers)];
+}

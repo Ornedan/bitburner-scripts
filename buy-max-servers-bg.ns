@@ -1,0 +1,10 @@
+export async function main(ns) {
+    const TARGET_MEM = ns.getPurchasedServerMaxRam();
+    
+    for (let i = 0; i < ns.getPurchasedServerLimit(); i++) {
+        while(ns.getServerMoneyAvailable("home") < ns.getPurchasedServerCost(TARGET_MEM) + 1)
+            await ns.sleep(1000);
+        
+        ns.purchaseServer(sprintf("worker-max-%02d", i + 1), TARGET_MEM);
+    }
+}

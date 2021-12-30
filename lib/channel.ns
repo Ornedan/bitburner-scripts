@@ -1,0 +1,61 @@
+import { promise } from "/lib/promise.ns";
+
+export const CHANNEL_CLOSED = "Channel closed";
+
+export async function withChannel(action) {
+    await withChannelArray(1, async chans => {
+        await action(chans[0]);
+    });
+}
+
+export async function withChannels(n, action) {
+    await withChannelArray(n, async chans => {
+        await action(...chans);
+    });
+}
+
+export async function withChannelArray(n, action) {
+    let chans = [];
+    for (let i = 0; i < n; i++)
+        chans.push(new Channel());
+
+    try {
+        await action(chans);
+    } catch (error) {
+        if (CHANNEL_CLOSED === error) {
+            throw new Error(CHANNEL_CLOSED);
+        }
+        throw error;
+    } finally {
+        for (let i = 0; i < n; i++)
+            chans[i].close();
+    }
+}
+
+export function Channel() {
+    this.out = promise();
+    this.in = this.out;
+
+    this.close = function() {
+        this.out.resolve(null);
+    };
+
+    this.readCh = async function() {
+        let msg = await this.in;
+
+        if (!msg)
+            throw CHANNEL_CLOSED;
+
+        this.in = msg.next;
+        return msg.value;
+    };
+
+    this.writeCh = function(value) {
+        let next = promise();
+        this.out.resolve({
+            next: next,
+            value: value,
+        });
+        this.out = next;
+    };
+}

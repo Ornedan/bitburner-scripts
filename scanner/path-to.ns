@@ -1,0 +1,12 @@
+import { getServerGraph, pathTo } from "/lib/deepscan.ns";
+
+/** @param {NS} ns */
+export async function main(ns) {
+    let destination = ns.args[0];
+
+    let scans = getServerGraph(ns);
+    let path = pathTo(scans, "home", destination);
+    let commands = path.map(step => "connect " + step);
+
+    ns.tprint(commands.join("; "));
+}

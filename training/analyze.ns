@@ -1,0 +1,76 @@
+import { getServerGraph } from "/lib/deepscan.ns";
+import { TRAINING_PORT } from "/lib/ports.js";
+
+/** @param {NS} ns **/
+export async function main(ns) {
+    let { port } = ns.flags([
+        ["port", false],
+    ]);
+
+    const player = ns.getPlayer();
+    const servers = getServerGraph(ns);
+    const analyzeds = [];
+
+    for (const id in servers) {
+        const server = ns.getServer(id);
+
+        if (ns.hasRootAccess(id)) {
+            const expGain = ns.formulas.hacking.hackExp(server, player);
+            const time = ns.formulas.hacking.hackTime(server, player);
+            analyzeds.push({
+                id,
+                expGain: expGain,
+                time: time,
+                expPerSec: expGain / time,
+            });
+        }
+    }
+
+    analyzeds.sort((s1, s2) => s2.expPerSec - s1.expPerSec); // Descending by expPerSec
+
+    if (port) {
+        ns.getPortHandle(TRAINING_PORT).write(analyzeds[0].id);
+    }
+    else {
+        for (const analyzed of analyzeds)
+            ns.tprint(sprintf("%20s: exp gain %6.2f, hack time %6.2fs, exp/s %5.4f",
+                analyzed.id, analyzed.expGain, analyzed.time, analyzed.expPerSec));
+    }
+}
+
+/** @param {NS} ns **/
+//function manualCalcs(ns) {
+//    const servers = getServerGraph(ns);
+//    const analyzeds = [];
+//
+//    for (const id in servers) {
+//        if (ns.hasRootAccess(id)) {
+//            // https://github.com/danielyxie/bitburner/blob/master/src/Hacking.js
+//
+//            const hackingLevel = ns.getHackingLevel();
+//            const multipliers = ns.getHackingMultipliers();
+//
+//            const baseDifficulty = ns.getServerBaseSecurityLevel(id);
+//            const minDifficulty = ns.getServerMinSecurityLevel(id);
+//            const requiredHacking = ns.getServerRequiredHackingLevel(id);
+//
+//            // calculateHackingExpGain(server)
+//            const expGain = 3 + 0.3 * baseDifficulty * (1 /* Player.hacking_exp_mult */);
+//            const hackTimeAtMinSec = 0;
+//
+//            // calculateHackingTime(server, hack, int)
+//            const skillFactor = (2.5 * (requiredHacking * minDifficulty) + 500) /
+//                (hackingLevel + 50 + (0.1 * (1 /* Player.intelligence */)));
+//            const hackingTime = 5 * skillFactor / multipliers.speed;
+//
+//            const expPerSec = expGain / hackingTime;
+//
+//            analyzeds.push({
+//                id,
+//                expGain,
+//                hackingTime,
+//                expPerSec,
+//            });
+//        }
+//    }
+//}

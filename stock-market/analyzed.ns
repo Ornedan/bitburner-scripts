@@ -1,0 +1,169 @@
+import { log, tlog } from "/lib/logging.ns";
+
+// stock.getPosition() return array index semantics
+const POS_SHARES = 0;
+const POS_SHARES_AVG = 1;
+const POS_SHORTS = 2;
+const POS_SHORTS_AVG = 3;
+
+/** Commission fee: 100k */
+const COMMISSION = 100000;
+
+/** Neutral forecast value from the API. */
+const NEUTRAL = 0.5;
+
+/** Maximum fraction of commission price of the total price: 1%. */
+const COMMISSION_MAX_FRAC = 0.01;
+/** Minimum reserve as fraction of total wealth: 10%. */
+const RESERVE_FRAC = 0.1;
+/** Minimum cash reserve: 10 million. */
+const RESERVE_MIN = 10000000;
+
+
+export async function main(ns) {
+    const syms = ns.stock.getSymbols();
+
+    const timestamps = [];
+    const timeSeries = {};
+    for (const sym of syms)
+        timeSeries[sym] = [];
+
+    let n = 1;
+    while (true) {
+        timestamps.push(Date.now());
+        record(ns, syms, timeSeries);
+
+        // Actions every minute
+        if (n % 10 == 0) {
+            //report(ns, syms, timeSeries);
+            adjust(ns, syms, timeSeries);
+        }
+
+        n += 1;
+
+        await ns.sleep(6000);
+    }
+}
+
+function record(ns, syms, timeSeries) {
+    for (const sym of syms) {
+        timeSeries[sym].push(ns.stock.getAskPrice(sym));
+    }
+}
+
+function report(ns, syms, timeSeries) {
+    let report = "=== Retrocasts ===\nSYM   | 1min | 2min | 4min";
+    
+    for (const sym of syms) {
+        const retro1 = retrocast(timeSeries[sym].slice(-10));
+        const retro2 = retrocast(timeSeries[sym].slice(-20));
+        const retro4 = retrocast(timeSeries[sym].slice(-40));
+        
+        report += sprintf("\n%5s | %.2f | %.2f | %.2f", sym, retro1, retro2, retro4);
+    }
+    
+    tlog(ns, "INFO", report);
+}
+
+function retrocast(data) {
+    let gains = 0;
+    for(let i = 1; i < data.length; i++)
+        gains += data[i] > data[i - 1] ? 1 : 0;
+    
+    return gains / (data.length - 1);
+}
+
+
+function adjust(ns, symbols, timeSeries) {
+    const stocks = [];
+
+    // 1. Analysis
+    let totalWealth = ns.getServerMoneyAvailable("home");
+
+    for (const symbol of symbols) {
+        const retro1 = retrocast(timeSeries[symbol].slice(-10));
+        const nonNeutrality = retro1 - NEUTRAL;
+        const score = Math.abs(nonNeutrality);
+
+        const stock = {
+            symbol: symbol,
+            position: ns.stock.getPosition(symbol),
+            price: ns.stock.getPrice(symbol),
+            max: ns.stock.getMaxShares(symbol),
+            forecast: retro1,
+            score: score,
+        };
+
+        totalWealth += stock.position[POS_SHARES] * stock.position[POS_SHARES_AVG] +
+            stock.position[POS_SHORTS] * stock.position[POS_SHORTS_AVG];
+
+        stocks.push(stock);
+    }
+
+    const reserve = Math.max(RESERVE_MIN, RESERVE_FRAC * totalWealth);
+
+    // 2. Sells
+    for (const stock of stocks) {
+        // 2.1 Sell off long positions that have below neutral forecast
+        if (stock.position[POS_SHARES] > 0 && stock.forecast < NEUTRAL) {
+            tlog(ns, "DEBUG", "Sold long: %s", stock.symbol);
+            ns.stock.sell(stock.symbol, stock.position[POS_SHARES]);
+        }
+
+        // 2.2 Sell off short positions that have above neutral forecast
+        if (stock.position[POS_SHORTS] > 0 && stock.forecast > NEUTRAL) {
+            tlog(ns, "DEBUG", "Sold short: %s", stock.symbol);
+            ns.stock.sellShort(stock.symbol, stock.position[POS_SHORTS]);
+        }
+    }
+
+    // 3. Buys
+    // Sort by score, descending
+    stocks.sort((stock1, stock2) => {
+        if (stock1.score > stock2.score)
+            return -1;
+        if (stock1.score == stock2.score)
+            return 0;
+        return 1;
+    });
+
+    // 3.1 Buy positions on stocks that have noticeably non-neutral forecast
+    for (const stock of stocks) {
+        if (stock.forecast > NEUTRAL) {
+            const availableMoney = ns.getServerMoneyAvailable("home") - reserve;
+            const toBuy = getAffordableStockCount(ns, stock, availableMoney, "L");
+            
+            if (toBuy > 0) {
+                ns.stock.buy(stock.symbol, toBuy);
+                tlog(ns, "DEBUG", "Bought long: %s", stock.symbol);
+            }
+        }
+        else if (stock.forecast < NEUTRAL) {
+            const availableMoney = ns.getServerMoneyAvailable("home") - reserve;
+            const toBuy = getAffordableStockCount(ns, stock, availableMoney, "S");
+            
+            if (toBuy > 0) {
+                ns.stock.short(stock.symbol, toBuy);
+                tlog(ns, "DEBUG", "Bought short: %s", stock.symbol);
+            }
+        }
+    }
+}
+
+function getAffordableStockCount(ns, stock, money, posType) {
+    const availableStock = stock.max - stock.position[POS_SHARES] - stock.position[POS_SHORTS];
+    if(availableStock <= 0)
+        return 0;
+    
+    // TODO: binary search
+    let count = availableStock;
+    let price;
+    while ((price = ns.stock.getPurchaseCost(stock.symbol, count, posType)) > money && count > 0)
+        count = Math.floor(count * 0.9);
+    
+    // Consider stock unaffordable if the commission fee is too large part of the price
+    if (price / (price - COMMISSION) > 1 + COMMISSION_MAX_FRAC)
+        return 0;
+    
+    return count;
+}

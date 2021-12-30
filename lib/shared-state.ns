@@ -1,0 +1,15 @@
+/** Store global state in an object that sits in a port. */
+const STORAGE_PORT = 20;
+
+export function getSharedState(ns, namespace) {
+    let carrier = ns.peek(STORAGE_PORT);
+    if (carrier === "NULL PORT DATA") {
+        carrier = {};
+        ns.write(STORAGE_PORT, carrier);
+    }
+
+    if (carrier[namespace] === undefined)
+        carrier[namespace] = {};
+
+    return carrier[namespace];
+}

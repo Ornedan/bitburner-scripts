@@ -1,0 +1,77 @@
+import { log, tlog } from "/lib/logging.ns";
+
+export async function main(ns) {
+    const syms = ns.stock.getSymbols();
+
+    const timestamps = [];
+    const timeSeries = {};
+    for (const sym of syms)
+        timeSeries[sym] = [];
+
+    let n = 1;
+    while (true) {
+        timestamps.push(Date.now());
+        record(ns, syms, timeSeries);
+
+        // Report every minute
+        if (n % 10 == 0)
+            report(ns, syms, timeSeries);
+
+        n += 1;
+
+        await ns.sleep(6000);
+    }
+}
+
+function record(ns, syms, timeSeries) {
+    for (const sym of syms) {
+        timeSeries[sym].push(ns.stock.getAskPrice(sym));
+    }
+}
+
+function report(ns, syms, timeSeries) {
+    let report = "=== Retrocasts ===\nSYM   | 1min | 2min | 4min";
+    
+    for (const sym of syms) {
+        const retro1 = retrocast(timeSeries[sym].slice(-10));
+        const retro2 = retrocast(timeSeries[sym].slice(-20));
+        const retro4 = retrocast(timeSeries[sym].slice(-40));
+        
+        report += sprintf("\n%5s | %.2f | %.2f | %.2f", sym, retro1, retro2, retro4);
+    }
+    
+    tlog(ns, "INFO", report);
+}
+
+function retrocast(data) {
+    let gains = 0;
+    for(let i = 1; i < data.length; i++)
+        gains += data[i] > data[i - 1] ? 1 : 0;
+    
+    return gains / (data.length - 1);
+}
+
+/*
+async function loadPlotly(doc, ns) {
+    if (!doc.getElementById("plotly-script")) {
+        const script = doc.createElement("script");
+        script.setAttribute("id", "plotly-script");
+        script.setAttribute("src", "https://cdn.plot.ly/plotly-latest.min.js");
+
+        const body = doc.querySelector("body");
+        body.appendChild(script);
+    }
+
+    while (!parent.Plotly) {
+        await ns.sleep(100);
+    }
+}
+
+function createContainer(doc) {
+    const container = doc.createElement("div");
+    container.style.cssText = "position: fixed; bottom: 0; right: 0; width: 10px; height: 10px";
+    container.innerHtml = "<span";
+    
+    return container;
+}
+*/

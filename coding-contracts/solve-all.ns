@@ -1,0 +1,51 @@
+import { listCodingContracts } from "/coding-contracts/list.ns";
+import { hasSolver, solve } from "/coding-contracts/solvers.ns";
+
+export async function main(ns) {
+    let contracts = listCodingContracts(ns);
+    let solverless = new Set();
+    let failed = [];
+
+    for (let contract of contracts) {
+        if (hasSolver(contract.type)) {
+            let start = Date.now();
+            let solution = solve(ns, contract.type, contract.data);
+            let end = Date.now();
+
+            if (end - start > 200)
+                ns.tprint(sprintf("Warning: calculating solution for '%s' data '%s' took over 200msec (%dmsec)",
+                    contract.type, contract.data, end - start));
+
+            ns.print(sprintf("Attempting to solve contract %s @ %s: '%s' data '%s' solution: %s",
+                contract.name, contract.node, contract.type, JSON.stringify(contract.data), JSON.stringify(solution)));
+
+            let accepted = ns.codingcontract.attempt(solution, contract.name, contract.node);
+            ns.print("Was accepted: " + accepted);
+
+            if (!accepted)
+                failed.push(contract);
+
+            let rewardEntry = ns.getScriptLogs().reverse().find(entry => /Reward: (.+)/.test(entry));
+            ns.write("cc-rewards.log.txt", rewardEntry + "\n", "a");
+
+            // Sleep a bit so we don't murder the UI
+            await ns.sleep(200);
+        } else {
+            solverless.add(contract.type);
+        }
+    }
+
+    for (let type of solverless)
+        ns.print("No solver for contract type: " + type);
+
+    if (failed.length > 0) {
+        ns.tprint("!!!!!!!!!!");
+        for (let contract of failed) {
+            ns.tprint(sprintf("Wrong solution for %s @ %s, type '%s', data %s",
+                contract.name, contract.node, contract.type, JSON.stringify(contract.data)));
+        }
+        ns.tprint("!!!!!!!!!!");
+    }
+
+    await ns.sleep(10 * 1000);
+}

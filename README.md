@@ -1,1 +1,1 @@
-# bitburner-scripts
+Mostly a mess of ancient scripts

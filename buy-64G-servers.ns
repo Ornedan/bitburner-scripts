@@ -1,0 +1,4 @@
+export async function main(ns) {
+    for (let i = ns.getPurchasedServers().length + 1; i <= 25; i++)
+        ns.purchaseServer(sprintf("worker-64G-%02d", i), 64);
+}

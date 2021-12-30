@@ -1,0 +1,22 @@
+export async function main(ns) {
+    const TARGET_MEM = 1024;
+
+    debugger;
+    const purchased = ns.getPurchasedServers();
+    purchased.sort();
+    
+    // 1. Fill free slots first
+    for(let i = purchased.length; i < ns.getPurchasedServerLimit(); i++)
+        if(ns.getServerMoneyAvailable("home") >= ns.getPurchasedServerCost(TARGET_MEM))
+            ns.purchaseServer(sprintf("worker-1024G-%02d", i + 1), TARGET_MEM);
+    
+    // 2. Replace existing servers
+    for(let i = 0; i < purchased.length; i++) {
+        if(ns.getServerRam(purchased[i])[0] < TARGET_MEM) {
+            if(ns.getServerMoneyAvailable("home") >= ns.getPurchasedServerCost(TARGET_MEM)) {
+                ns.deleteServer(purchased[i]);
+                ns.purchaseServer(sprintf("worker-1024G-%02d", i + 1), TARGET_MEM);
+            }
+        }
+    }
+}

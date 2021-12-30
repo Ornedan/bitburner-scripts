@@ -1,0 +1,7 @@
+import { HACK_CLUSTER_PORT } from "/lib/ports.js";
+
+/** @param {NS} ns **/
+export async function main(ns) {
+    ns.clear(HACK_CLUSTER_PORT);
+    ns.write(HACK_CLUSTER_PORT, true);
+}

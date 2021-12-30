@@ -1,0 +1,74 @@
+import { getServerGraph } from "/lib/deepscan.ns";
+
+export async function main(ns) {
+    const { ls: showFiles, stats: showStats, _: targets } = ns.flags([
+        ["ls", false],
+        ["stats", false]
+    ]);
+
+    let scans = getServerGraph(ns);
+    let start = "home";
+
+    if(targets.length == 0) {
+        ns.tprint("\n" + treeViz(ns, scans, start, showFiles, showStats));
+    }
+    else for(let target of targets) {
+        let tmp = {};
+        tmp[target] = scans[target];
+        tmp[target].adjacents = [];
+        ns.tprint("\n" + treeViz(ns, tmp, target, showFiles, showStats));
+    }
+}
+
+
+function treeViz(ns, scanGraph, start, showFiles, showStats) {
+    function step(prev, cur) {
+        let node = scanGraph[cur];
+        let children = node.adjacents.filter(id => id != prev);
+        let prefix = children.length > 0 ? "│" : "";
+        let lines = [];
+
+        lines.push(sprintf("%s", node.id));
+
+        if (showStats) {
+            lines.push(sprintf("%s  root:     %s",
+                prefix, ns.hasRootAccess(node.id)));
+            lines.push(sprintf("%s  money:    %d / %d",
+                prefix, ns.getServerMoneyAvailable(node.id), ns.getServerMaxMoney(node.id)));
+            lines.push(sprintf("%s  growth:   %d",
+                prefix, ns.getServerGrowth(node.id)));
+            lines.push(sprintf("%s  security: %.1f / %.1f (base %.1f)",
+                prefix, ns.getServerSecurityLevel(node.id), ns.getServerMinSecurityLevel(node.id),
+                ns.getServerBaseSecurityLevel(node.id)));
+            lines.push(sprintf("%s  hack-req: %d",
+                prefix, ns.getServerRequiredHackingLevel(node.id)));
+            lines.push(sprintf("%s  times:    hack = %d, grow = %d, weaken = %d",
+                prefix, ns.getHackTime(node.id), ns.getGrowTime(node.id), ns.getWeakenTime(node.id)));
+        }
+
+        if (showFiles) {
+            let files = node.id == "home" ? [] : ns.ls(node.id);
+            for (let file of files)
+                lines.push(sprintf("%s  /%s", prefix, file));
+        }
+
+        for (let i = 0; i < children.length; i++) {
+            let next = children[i];
+
+            let sublines = step(cur, next);
+
+            if (i < children.length - 1) { // not last
+                lines.push("├ " + sublines[0]);
+                for (let j = 1; j < sublines.length; j++)
+                    lines.push("│ " + sublines[j]);
+            } else { // last
+                lines.push("└ " + sublines[0]);
+                for (let j = 1; j < sublines.length; j++)
+                    lines.push("  " + sublines[j]);
+            }
+        }
+
+        return lines;
+    }
+    return step(null, start).join("\n");
+}

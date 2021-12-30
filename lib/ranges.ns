@@ -1,0 +1,92 @@
+// TODO: binary searches
+export class Ranges {
+    constructor() {
+        this.ranges = [];
+    }
+
+    toString() {
+        return `Range(${this.ranges.map(range => range[0] + "-" + range[1])})`;
+    }
+
+    add(toAdd) {
+        let i0, i1;
+
+        // Advance until we find a range that ends before the new one starts
+        for (i0 = 0; i0 < this.ranges.length; i0++) {
+            if (toAdd[0] < this.ranges[i0][1])
+                break;
+        }
+
+        i1 = i0;
+
+        // Immediately follows previous?
+        if (i0 > 0 && toAdd[0] == this.ranges[i0 - 1][1]) {
+            toAdd = Ranges.merge(toAdd, this.ranges[i0 - 1]);
+            i0 = i0 - 1;
+        }
+
+        // Merge with later ranges that the new one overlaps or is immediately adjacent to
+        while (i1 < this.ranges.length && toAdd[1] >= this.ranges[i1][0]) {
+            toAdd = Ranges.merge(toAdd, this.ranges[i1]);
+            i1 = i1 + 1;
+        }
+
+        this.ranges.splice(i0, i1 - i0, toAdd);
+    }
+
+    cutBefore(cutoff) {
+        // Drop ranges that are entirely before the cutoff
+        while (this.ranges[0][1] <= cutoff)
+            this.ranges.shift();
+
+        if (this.ranges.length > 0 && this.ranges[0][0] < cutoff)
+            this.ranges[0][0] = cutoff;
+    }
+
+    static merge(range1, range2) {
+        if (!range1 || !range2) debugger;
+
+        return [Math.min(range1[0], range2[0]), Math.max(range1[1], range2[1])];
+    }
+
+    static overlaps(range1, range2) {
+        if (!range1 || !range2) debugger;
+
+        // Range1 start in range2
+        // r1:   ***
+        // r2: ***
+        if (range1[0] >= range2[0] && range1[0] < range2[1])
+            return true;
+
+        // Range1 end in range2
+        // r1: ***
+        // r2:   ***
+        if (range1[1] > range2[0] && range1[1] <= range2[1])
+            return true;
+
+        // Range1 envelops or equals range2
+        // r1: *****
+        // r2:  ***
+        if (range1[0] <= range2[0] && range1[1] >= range2[1])
+            return true;
+
+        // No overlap
+        return false;
+    }
+
+    getOverlap(checkee) {
+        for (let range of this.ranges)
+            if (Ranges.overlaps(range, checkee))
+                return range;
+
+        return undefined;
+    }
+
+    minimumAdvanceToAvoidOverlap(range) {
+        const overlap = this.getOverlap(range);
+        if (overlap === undefined)
+            return 0;
+
+        return overlap[1] - range[0];
+    }
+}

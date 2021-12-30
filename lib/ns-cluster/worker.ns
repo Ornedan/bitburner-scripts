@@ -1,0 +1,19 @@
+import { getIPCStore } from "/lib/ipc-store.js";
+
+// TODO: Figure out a way to automatically include imports when scp'ing.
+//       Until then this will have to remain just a template
+export async function workerMain(ns) {
+    const promises = getIPCStore(ns)[ns.args[0]];
+
+    // Probably reviving from save
+    if (!promises) {
+        ns.tprintf("ERROR ns-cluster Promise store does not contain key %s", ns.args[0]);
+        return;
+    }
+
+    const { nsP, quitP } = promises;
+
+    // Pass ns instance to controller and wait for quit signal
+    nsP.resolve(ns);
+    await quitP;
+}

@@ -1,0 +1,66 @@
+import { getServerGraph } from "/lib/deepscan.ns";
+import { log, tlog } from "/lib/logging.ns";
+
+export async function main(ns) {
+    const servers = await getServerGraph(ns);
+    const order = [];
+    for (const id in servers)
+        order.push(id);
+
+    order.sort((sid1, sid2) => {
+        const ports1 = ns.getServerNumPortsRequired(sid1);
+        const ports2 = ns.getServerNumPortsRequired(sid2);
+
+        if (ports1 < ports2)
+            return -1;
+        if (ports1 > ports2)
+            return 1;
+        return 0;
+    });
+
+    for (const id of order) {
+        const server = servers[id];
+
+        if (!ns.hasRootAccess(id)) {
+            switch (ns.getServerNumPortsRequired(id)) {
+                case 5:
+                    if (ns.fileExists("SQLInject.exe", "home"))
+                        ns.sqlinject(id);
+                    else break;
+                case 4:
+                    if (ns.fileExists("HTTPWorm.exe", "home"))
+                        ns.httpworm(id);
+                    else break;
+                case 3:
+                    if (ns.fileExists("relaySMTP.exe", "home"))
+                        ns.relaysmtp(id);
+                    else break;
+                case 2:
+                    if (ns.fileExists("FTPCrack.exe", "home"))
+                        ns.ftpcrack(id);
+                    else break;
+                case 1:
+                    if (ns.fileExists("BruteSSH.exe", "home"))
+                        ns.brutessh(id);
+                    else break;
+                case 0:
+                    ns.nuke(id);
+            }
+        }
+    }
+    
+    const rooted = [];
+    const unrooted = [];
+        
+    for (const id of order) {
+        const server = servers[id];
+
+        if (ns.hasRootAccess(id))
+            rooted.push(id);
+        else
+            unrooted.push(id);
+    }
+    
+    tlog(ns, "INFO", "Rooted servers: %s", rooted.join(", "));
+    tlog(ns, "INFO", "Un-rooted servers: %s", unrooted.join(", "));
+}

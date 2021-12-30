@@ -1,0 +1,93 @@
+import { getIPCStore } from "/lib/ipc-store.js";
+import { promise } from "/lib/promise.ns";
+
+export async function startWorkers(ns, specs) {
+    const store = getIPCStore(ns);
+
+    // Stage 1
+    // 
+    // Start worker scripts
+    const workerStarts = Array.isArray(specs) ? [] : {};
+    for (const id in specs) {
+        const spec = specs[id];
+        const result = await startWorker(ns, store,
+            spec.script, spec.server, spec.threads, ...(spec.args ? spec.args : []));
+        // Kill all already started workers and stop
+        if (!result) {
+            for (const id in workerStarts) {
+                const start = workerStarts[id];
+                start.quitP.resolve();
+                delete store[start.uuid];
+            }
+            throw new Error("Failed to start a worker script: " + JSON.stringify(spec));
+        }
+        workerStarts[id] = result;
+    }
+
+    // Stage 2
+    //
+    // Wait for NS instances
+    const workers = Array.isArray(specs) ? [] : {};
+    for (const id in workerStarts) {
+        const start = workerStarts[id];
+        const workerNS = await start.nsP;
+        workers[id] = {
+            ns: workerNS,
+            pid: start.pid,
+            quit: () => start.quitP.resolve(),
+            die: (error) => start.quitP.reject(error),
+            spec: specs[id],
+        };
+    }
+
+    // Stage 3
+    //
+    // Clean up stored values
+    for (const id in workerStarts) {
+        const start = workerStarts[id];
+        delete store[start.uuid];
+    }
+
+    return workers;
+}
+
+async function startWorker(ns, store, script, server, threads, ...args) {
+    const nsP = promise();
+    const quitP = promise();
+    const uuid = storePromises(store, nsP, quitP);
+
+    if (!uuid)
+        return false;
+
+    const pid = ns.exec(script, server, threads, uuid, ...args);
+    if (!pid)
+        return false;
+
+    return {
+        pid,
+        uuid,
+        nsP,
+        quitP
+    };
+}
+
+function storePromises(store, nsP, quitP) {
+    for (let i = 0; i < 1e6; i++) { // Very unlikely to not find an unused UUID in 1e6 tries
+        const uuid = crypto.randomUUID();
+        if (!store[uuid]) {
+            store[uuid] = { nsP, quitP };
+            return uuid;
+        }
+    }
+    return false;
+}
+
+export async function workerCall(worker, func, ...args) {
+    try {
+        return await worker.ns[func](...args);
+    } catch (error) {
+        worker.die(error);
+        throw new Error("Worker died during call to '" + func + "'",
+            { cause: error });
+    }
+}
