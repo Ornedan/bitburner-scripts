@@ -1,7 +1,7 @@
 import { getServerGraph } from "/lib/deepscan.ns";
 
 export function listCodingContracts(ns) {
-    let scans = getServerGraph(ns, ["home"].concat(ns.getPurchasedServers()));
+    let scans = getServerGraph(ns, ns.getPurchasedServers());
     let contracts = [];
     for (let id in scans) {
         for (let contract of ns.ls(id, ".cct"))

@@ -1,0 +1,9 @@
+/** @param {NS} ns **/
+export async function main(ns) {
+    await ns.writePort(1, { a: 1 });     // Throws error
+    await ns.tryWritePort(1, { a: 1 });  // Works
+    ns.getPortHandle(1).write({ a: 1 }); // Works
+
+    let v = ns.readPort(1);
+    ns.tprintf("type of value read: %s, JSON: %s", typeof v, JSON.stringify(v));
+}

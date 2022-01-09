@@ -1,21 +1,37 @@
+import { tlog } from "/lib/logging.ns";
+
+/** @param {NS} ns **/
 export async function main(ns) {
     const TARGET_MEM = 1024;
 
     debugger;
     const purchased = ns.getPurchasedServers();
     purchased.sort();
-    
+
     // 1. Fill free slots first
-    for(let i = purchased.length; i < ns.getPurchasedServerLimit(); i++)
-        if(ns.getServerMoneyAvailable("home") >= ns.getPurchasedServerCost(TARGET_MEM))
-            ns.purchaseServer(sprintf("worker-1024G-%02d", i + 1), TARGET_MEM);
-    
+    for (let i = purchased.length; i < ns.getPurchasedServerLimit(); i++) {
+        if (ns.getServerMoneyAvailable("home") >= ns.getPurchasedServerCost(TARGET_MEM)) {
+            const name = sprintf("worker-1024G-%02d", i + 1);
+            if (!ns.purchaseServer(name, TARGET_MEM)) {
+                tlog(ns, "ERROR", "Failed to buy 1024G server '%s'", name);
+                return;
+            }
+        }
+    }
+
     // 2. Replace existing servers
-    for(let i = 0; i < purchased.length; i++) {
-        if(ns.getServerRam(purchased[i])[0] < TARGET_MEM) {
-            if(ns.getServerMoneyAvailable("home") >= ns.getPurchasedServerCost(TARGET_MEM)) {
-                ns.deleteServer(purchased[i]);
-                ns.purchaseServer(sprintf("worker-1024G-%02d", i + 1), TARGET_MEM);
+    for (let i = 0; i < purchased.length; i++) {
+        if (ns.getServerMaxRam(purchased[i]) < TARGET_MEM) {
+            if (ns.getServerMoneyAvailable("home") >= ns.getPurchasedServerCost(TARGET_MEM)) {
+                if (!ns.deleteServer(purchased[i])) {
+                    tlog(ns, "ERROR", "Failed to delete old server '%s'", purchased[i]);
+                    return;
+                }
+                const name = sprintf("worker-1024G-%02d", i + 1);
+                if (!ns.purchaseServer(name, TARGET_MEM)) {
+                    tlog(ns, "ERROR", "Failed to buy 1024G server '%s'", name);
+                    return;
+                }
             }
         }
     }

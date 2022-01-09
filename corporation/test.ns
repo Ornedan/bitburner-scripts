@@ -1,0 +1,22 @@
+/** @param {NS} ns **/
+export async function main(ns) {
+	const toSpend = ns.corporation.getCorporation().funds * 0.9;
+	ns.corporation.makeProduct("Tob", "Sector-12", "prod-27", Math.floor(toSpend / 2), Math.floor(toSpend / 2));
+
+	ns.getScriptLogs().forEach(line => ns.tprint(line));
+
+	/*
+	for(let i = 0; i < 200; i++)
+		ns.corporation.levelUpgrade("Smart Factories");
+	for(let i = 0; i < 500; i++)
+		ns.corporation.levelUpgrade("Nuoptimal Nootropic Injector Implants");
+	for(let i = 0; i < 500; i++)
+		ns.corporation.levelUpgrade("Speech Processor Implants");
+	for(let i = 0; i < 500; i++)
+		ns.corporation.levelUpgrade("Neural Accelerators");
+	for(let i = 0; i < 500; i++)
+		ns.corporation.levelUpgrade("FocusWires");
+	for(let i = 0; i < 500; i++)
+		ns.corporation.levelUpgrade("ABC SalesBots");
+	*/
+}

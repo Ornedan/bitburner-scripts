@@ -1,10 +1,11 @@
 import { listCodingContracts } from "/coding-contracts/list.ns";
 import { hasSolver, solve } from "/coding-contracts/solvers.ns";
+import { tlog } from "/lib/logging.ns";
 
+/** @param {NS} ns **/
 export async function main(ns) {
     let contracts = listCodingContracts(ns);
     let solverless = new Set();
-    let failed = [];
 
     for (let contract of contracts) {
         if (hasSolver(contract.type)) {
@@ -13,20 +14,23 @@ export async function main(ns) {
             let end = Date.now();
 
             if (end - start > 200)
-                ns.tprint(sprintf("Warning: calculating solution for '%s' data '%s' took over 200msec (%dmsec)",
-                    contract.type, contract.data, end - start));
+                tlog(ns, "WARN", "Warning: calculating solution for '%s' data '%s' took over 200msec (%dmsec)",
+                    contract.type, contract.data, end - start);
 
-            ns.print(sprintf("Attempting to solve contract %s @ %s: '%s' data '%s' solution: %s",
-                contract.name, contract.node, contract.type, JSON.stringify(contract.data), JSON.stringify(solution)));
+            tlog(ns, "INFO", "Attempting to solve contract %s @ %s: '%s' data '%s' solution: %s",
+                contract.name, contract.node, contract.type, JSON.stringify(contract.data), JSON.stringify(solution));
 
             let accepted = ns.codingcontract.attempt(solution, contract.name, contract.node);
-            ns.print("Was accepted: " + accepted);
 
-            if (!accepted)
-                failed.push(contract);
-
-            let rewardEntry = ns.getScriptLogs().reverse().find(entry => /Reward: (.+)/.test(entry));
-            ns.write("cc-rewards.log.txt", rewardEntry + "\n", "a");
+            if (!accepted) {
+                tlog(ns, "ERROR", "Wrong solution for %s @ %s, type '%s', data %s",
+                    contract.name, contract.node, contract.type, JSON.stringify(contract.data));
+            }
+            else {
+                let rewardEntry = ns.getScriptLogs().reverse().find(entry => /Reward: (.+)/.test(entry));
+                await ns.write("cc-rewards.log.txt", rewardEntry + "\n", "a");
+                tlog(ns, "SUCCESS", "Was accepted, got %s", rewardEntry);
+            }
 
             // Sleep a bit so we don't murder the UI
             await ns.sleep(200);
@@ -36,16 +40,5 @@ export async function main(ns) {
     }
 
     for (let type of solverless)
-        ns.print("No solver for contract type: " + type);
-
-    if (failed.length > 0) {
-        ns.tprint("!!!!!!!!!!");
-        for (let contract of failed) {
-            ns.tprint(sprintf("Wrong solution for %s @ %s, type '%s', data %s",
-                contract.name, contract.node, contract.type, JSON.stringify(contract.data)));
-        }
-        ns.tprint("!!!!!!!!!!");
-    }
-
-    await ns.sleep(10 * 1000);
+        tlog(ns, "WARN", "No solver for contract type: %s", type);
 }

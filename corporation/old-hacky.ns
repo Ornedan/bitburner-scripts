@@ -1,0 +1,213 @@
+const doc = parent["document"];
+const win = parent["window"];
+
+
+export async function main(ns) {
+    await createCorporationIfNotExists();
+
+    initialSetup();
+    
+    //openIndustryScreen("Tobac");
+
+    //assignWorkers(4,4,2,2,1);
+}
+
+async function createCorporationIfNotExists() {
+    // Already exists?
+    if (win.getComputedStyle(doc.getElementById("corporation-tab")).display != "none")
+        return;
+
+    const cityBtn = doc.getElementById("city-menu-link");
+    cityBtn.click();
+
+    const hallBtn = Array.from(doc.querySelectorAll("#location-container button"))
+        .filter(element => element.textContent.indexOf("Sector-12 City Hall") >= 0);
+    hallBtn[0].click();
+
+    const createBtn = Array.from(doc.querySelectorAll("#location-container button"))
+        .filter(element => element.textContent.indexOf("Create a Corporation") >= 0);
+    createBtn[0].click();
+
+    const nameField = doc.querySelector("#create-corporation-popup-content input[placeholder='Corporation Name']");
+    nameField.value = "Corporation";
+
+    const seedBtn = Array.from(doc.querySelectorAll("#create-corporation-popup-content button"))
+        .filter(element => element.textContent.indexOf("Use Seed Money") >= 0);
+    seedBtn[0].click();
+
+    // Wait for the dialog to become closeable, then close it
+    await ns.sleep(500);
+    doc.querySelector(".dialog-box-close-button").click();
+}
+
+function initialSetup() {
+    if(findElement(".cmpy-mgmt-header-tab", "Agriculture"))
+        return;
+    
+    // Create an agriculture industry and initial upgrades with the seed money
+
+    openCorporationScreen();
+    createIndustry("Agriculture");
+
+    selectIndustry("Corporation");
+    buyCorporationUpgrade("Smart Supply");
+    buyCorporationUpgrade("Smart Factories");
+    buyCorporationUpgrade("DreamSense");
+
+    function setupDivision() {
+        expandWorkers3();
+        hireToFull();
+
+        coffeeToMax();
+        throwParty(10000000);
+
+        assignWorkers("O", 3);
+        assignWorkers("B", 1);
+        assignWorkers("M", 1);
+        assignWorkers("R", 1);
+
+        const buyWarehouse = findElement(".cmpy-mgmt-warehouse-panel button", "Purchase Warehouse");
+        if (buyWarehouse)
+            buyWarehouse.click();
+
+        findElement(".cmpy-mgmt-warehouse-panel button", "Upgrade Warehouse Size").click();
+        doc.querySelector("#cmpy-mgmt-smart-supply-checkbox").click();
+        setSellMaxMP("Food");
+        setSellMaxMP("Plants");
+        setConstantBuy("Real Estate", 10);
+    }
+
+    selectIndustry("Agriculture"); // Sector-12 already created and selected
+    setupDivision();
+    createDivision("Aevum");
+    setupDivision();
+    createDivision("Chongqing");
+    setupDivision();
+    createDivision("Ishima");
+    setupDivision();
+    createDivision("New Tokyo");
+    setupDivision();
+    createDivision("Volhaven");
+    setupDivision();
+}
+
+function openCorporationScreen() {
+    // If the management screen element exists, we're already viewing it
+    if (doc.getElementById("cmpy-mgmt-container"))
+        return;
+
+    // Otherwise click the sidebar "Corp" button
+    const corpBtn = doc.getElementById("corporation-menu-link");
+    corpBtn.click();
+}
+
+function openIndustryScreen(name) {
+    openCorporationScreen(); // Corp view must be open
+
+    const industryBtns = Array.from(doc.querySelectorAll(".cmpy-mgmt-header-tab"))
+        .filter(div => div.innerHTML == name);
+
+    if (industryBtns.length != 1)
+        throw new Error("Unexpected industry button matches: " + industryBtns);
+
+    industryBtns[0].click();
+}
+
+function createIndustry(name) {
+    findElement(".cmpy-mgmt-header-tab", "Expand into new Industry").click();
+
+    doc.querySelector("#cmpy-mgmt-expand-industry-popup-content .dropdown option[value='" + name + "']").selected = true;
+    doc.querySelector("#cmpy-mgmt-expand-industry-name-input").value = name;
+
+    findElement("#cmpy-mgmt-expand-industry-popup-content .popup-box-button", "Create Division").click();
+}
+
+function createDivision(city) {
+    findElement(".cmpy-mgmt-city-tab", "Expand into new City").click();
+
+    doc.querySelector("#cmpy-mgmt-expand-city-popup-content .dropdown option[value='" + city + "']").selected = true;
+
+    findElement("#cmpy-mgmt-expand-city-popup-content button", "Confirm").click();
+}
+
+function expandWorkers3() {
+    findElement(".cmpy-mgmt-employee-panel button", "Upgrade size").click();
+    findElement("#cmpy-mgmt-upgrade-office-size-popup-content button", "by 3").click();
+}
+
+function hireToFull() {
+    const employees = doc.querySelector(".cmpy-mgmt-employee-panel").textContent
+        .match(/Size: ([0-9]+) \/ ([0-9]+) employees/);
+    const cur = parseInt(employees[1]);
+    const max = parseInt(employees[2]);
+
+    for (let i = cur; i < max; i++) {
+        findElement(".cmpy-mgmt-employee-panel button", "Autohire Employee").click();
+    }
+}
+
+function assignWorkers(type, count) {
+    const assignBtns = Array.from(document.querySelectorAll(".cmpy-mgmt-employee-panel button"))
+        .filter(elem => elem.textContent == "+");
+    // Operations, Engineering, Business, Management, Research, Training
+    const btn = assignBtns[{ "O": 0, "E": 1, "B": 2, "M": 3, "R": 4, "T": 5 }[type]];
+
+    for (let n = 0; n < count; n++)
+        btn.click();
+}
+
+function setSellMaxMP(name) {
+    const material = findElement(".cmpy-mgmt-warehouse-material-div", name + ":");
+    findElement(material, ".std-button", "Sell ").click();
+
+    doc.querySelector("#cmpy-mgmt-material-sell-popup-content input[placeholder='Sell amount']").value = "MAX";
+    doc.querySelector("#cmpy-mgmt-material-sell-popup-content input[placeholder='Sell price']").value = "MP";
+
+    findElement("#cmpy-mgmt-material-sell-popup-content button", "Confirm").click();
+}
+
+function setConstantBuy(name, amount) {
+    const material = findElement(".cmpy-mgmt-warehouse-material-div", name + ":");
+    findElement(material, ".std-button", "Buy ").click();
+
+    doc.querySelector("#cmpy-mgmt-material-purchase-popup-content input[placeholder='Purchase amount']").value = amount;
+
+    findElement("#cmpy-mgmt-material-purchase-popup-content button", "Confirm").click();
+}
+
+function selectIndustry(name) {
+    findElement(".cmpy-mgmt-header-tab", name).click();
+}
+
+function buyCorporationUpgrade(name) {
+    findElement(".cmpy-mgmt-upgrade-container .cmpy-mgmt-upgrade-div", name).click();
+}
+
+function coffeeToMax() {
+    let energy = doc.querySelector(".cmpy-mgmt-employee-panel").textContent
+        .match(/Avg Employee Energy: ([0-9]+.[0-9]+)/)[1];
+
+    while (parseFloat(energy) < 99.5) {
+        findElement(".cmpy-mgmt-upgrade-div", "Coffee").click();
+        energy = doc.querySelector(".cmpy-mgmt-employee-panel").textContent
+            .match(/Avg Employee Energy: ([0-9]+.[0-9]+)/)[1];
+    }
+}
+
+function throwParty(amount) {
+    findElement(".cmpy-mgmt-employee-panel button", "Throw Party").click();
+    doc.querySelector("#cmpy-mgmt-throw-office-party-popup-content input").value = amount;
+    findElement("#cmpy-mgmt-throw-office-party-popup-content button", "Throw Party").click();
+}
+
+function findElement() {
+    let context, selector, text;
+    if (arguments.length > 2) {
+        [context, selector, text] = arguments;
+    } else {
+        context = doc;
+        [selector, text] = arguments;
+    }
+
+    return Array.from(context.querySelectorAll(selector)).filter(elem => elem.textContent.indexOf(text) >= 0)[0];
+}

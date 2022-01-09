@@ -1,0 +1,49 @@
+import { log, tlog } from "/lib/logging.ns";
+
+const fullHackingGear = [
+    // Rootkits
+    "NUKE Rootkit", "Soulstealer Rootkit", "Demon Rootkit", "Hmap Node", "Jack the Ripper",
+    // Vehicles
+    "Ford Flex V20", "ATX1070 Superbike", "Mercedes-Benz S9001", "White Ferrari",
+    // Hacking augs
+    "BitWire", "Neuralstimulator", "DataJack"
+];
+
+export async function main(ns) {
+    const member = ns.args[0];
+    const ascensions = parseInt(ns.args[1]);
+    const fullGear = ns.args[2] == "true";
+
+    const gangInfo = ns.gang.getGangInformation();
+
+
+    // Ascend-boost
+    for (let i = 0; i < ascensions; i++) {
+        // Probably the most money-efficient way to boost all relevant stats
+        if (!gangInfo.isHacking)
+            ns.gang.purchaseEquipment(member, "Glock 18C"); // Combat stats for combat gangs
+        
+        ns.gang.purchaseEquipment(member, "NUKE Rootkit"); // Hacking for both
+
+        // Some charisma for both
+        if(i % 2 == 0)
+            ns.gang.purchaseEquipment(member, "Ford Flex V20");
+
+        ns.gang.ascendMember(member);
+        
+        if(i % 50000 == 0)
+            await ns.sleep(50);
+    }
+
+    // Fully deck them out to finish the job
+    if (fullGear) {
+        if (gangInfo.isHacking)
+            for (const name of fullHackingGear) // Hacking gangs only use hacking and charisma
+                ns.gang.purchaseEquipment(member, name);
+        else
+            for (const name of ns.gang.getEquipmentNames()) // Fighting gangs use a bit of all stats
+                ns.gang.purchaseEquipment(member, name);
+    }
+
+    tlog(ns, "DEBUG", "%s", JSON.stringify(ns.gang.getMemberInformation(member), null, 1));
+}

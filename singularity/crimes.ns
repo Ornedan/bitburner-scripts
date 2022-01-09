@@ -1,0 +1,11 @@
+import { log, tlog } from "/lib/logging.ns";
+
+export async function main(ns) {
+    for(let i = 0; i < 1000; i++) {
+        const secs = ns.commitCrime("mug");
+        await ns.sleep(secs);
+        while(ns.isBusy()) {
+            await ns.sleep(100);
+        }
+    }
+}

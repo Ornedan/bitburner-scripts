@@ -1,16 +1,17 @@
+import { log, tlog } from "/lib/logging.ns";
+
 /** @param {NS} ns **/
 export async function main(ns) {
-	while (true) {
-		await stage1(ns);
+	await stage1(ns);
 
-		await ns.sleep(10 * 1000);
-	}
+	await ns.sleep(10 * 1000);
 }
 
 /**
- * Stage 1, do if either:
+ * Stage 1, do if any:
  * - hacking level < 200
  * - home RAM < 1024GB
+ * - TODO: not yet in possession of full set of buyable programs
  * 
  * @param {NS} ns 
  */
@@ -19,20 +20,33 @@ async function stage1(ns) {
 	if (status.hacking >= 200 && ns.getServerMaxRam("home") >= 1024)
 		return;
 
+	const start = performance.now();
+
+	// TODO: start background criming, maybe outside stage1
+	// TODO: start corporationing, maybe outside stage1
+
 	// Step 1: root everything initially available
 	await doScript(ns, "/hack-cluster/root-all.ns");
 
-	// Step 2: train on n00dles until 50 hacking
-	await doScript(ns, "/training/train.js",
-		"--minSkill", "50",
-		"--useReserve", "true",
-		"--target", "n00dles");
+	// Step 2: train on n00dles until 10 hacking
+	if (status.hacking < 50)
+		await doScript(ns, "/training/train.js",
+			"--minSkill", "10",
+			"--useReserve", "true",
+			"--target", "n00dles");
 
-	// Step 2: train on joesguns until 150 hacking
-	await doScript(ns, "/training/train.js",
-		"--minSkill", "150",
-		"--useReserve", "true",
-		"--target", "joesguns");
+	// Step 3: train on joesguns until 150 hacking
+	if (status.hacking < 150)
+		await doScript(ns, "/training/train.js",
+			"--minSkill", "150",
+			"--useReserve", "true",
+			"--target", "joesguns");
+
+	const end = performance.now();
+
+	tlog(ns, "SUCCESS", "Reached 150 hacking in %s", ns.tFormat(end - start));
+
+	// Step 3: start hacking for money
 }
 
 async function doScript(ns, script, ...args) {

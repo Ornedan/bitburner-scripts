@@ -12,7 +12,10 @@ export async function main(ns) {
     const targets = getPreparableServers(ns, ns.args);
 
     if (targets.length == 0)
-        tlog(ns, "INFO", "No root-accessible servers need preparing");
+        if (ns.args.length == 0)
+            tlog(ns, "INFO", "No root-accessible servers need preparing");
+        else
+            tlog(ns, "INFO", "All target servers already prepared: " + ns.args.join(", "));
 
     while (targets.length > 0) {
         // 1. Start as many workers as we can fit in total RAM

@@ -57,7 +57,9 @@ const MAX_PACKING = 1 / 3;
 
 /** @param {NS} ns **/
 export async function main(ns) {
-    ns.disableLog("ALL");
+    ["sleep", "exec", "scp", "scan", "getServerMoneyAvailable", "getServerMaxMoney",
+        "getHackingLevel", "getServerRequiredHackingLevel", "getServerUsedRam", "getServerMaxRam",
+        "getServerMinSecurityLevel", "getServerSecurityLevel"].forEach(fn => ns.disableLog(fn));
 
     while (true) {
         const servers = ns.args.length > 0 ? ns.args : Object.keys(await getServerGraph(ns));
@@ -184,25 +186,25 @@ async function schedulingLoop(ns, conf, workers) {
                 // starts at a time when security level might be above minimum
                 // (after hack or grow, before the corresponding weaken)
 
-// =============================== original line ===============================
-/**
- *                 const hackTime = Math.round(ns.getHackTime(target) * 1000);
- */
-// =============================================================================
+                // =============================== original line ===============================
+                /**
+                 *                 const hackTime = Math.round(ns.getHackTime(target) * 1000);
+                 */
+                // =============================================================================
                 //const hackTime = Math.round(((...a)=>ns.getHackTime(...a)/1000)(target) * 1000);
                 const hackTime = ns.getHackTime(target);
-// =============================== original line ===============================
-/**
- *                 const growTime = Math.round(ns.getGrowTime(target) * 1000);
- */
-// =============================================================================
+                // =============================== original line ===============================
+                /**
+                 *                 const growTime = Math.round(ns.getGrowTime(target) * 1000);
+                 */
+                // =============================================================================
                 //const growTime = Math.round(((...a)=>ns.getGrowTime(...a)/1000)(target) * 1000);
                 const growTime = ns.getGrowTime(target);
-// =============================== original line ===============================
-/**
- *                 const weakTime = Math.round(ns.getWeakenTime(target) * 1000);
- */
-// =============================================================================
+                // =============================== original line ===============================
+                /**
+                 *                 const weakTime = Math.round(ns.getWeakenTime(target) * 1000);
+                 */
+                // =============================================================================
                 //const weakTime = Math.round(((...a)=>ns.getWeakenTime(...a)/1000)(target) * 1000);
                 const weakTime = ns.getWeakenTime(target);
                 const targetTime0 =
@@ -294,11 +296,11 @@ async function hackDriver(ns, worker, target, end, hackingLevel0, hackFrac, done
     // Get awaitable promises from worker NS, do all other calls on controller NS
 
     // 1. Initial wait
-// =============================== original line ===============================
-/**
- *     const hackTime0 = Math.round(ns.getHackTime(target) * 1000);
- */
-// =============================================================================
+    // =============================== original line ===============================
+    /**
+     *     const hackTime0 = Math.round(ns.getHackTime(target) * 1000);
+     */
+    // =============================================================================
     //const hackTime0 = Math.round(((...a)=>ns.getHackTime(...a)/1000)(target) * 1000);
     const hackTime0 = ns.getHackTime(target);
     const initialWait = end - performance.now() - hackTime0;
@@ -308,11 +310,11 @@ async function hackDriver(ns, worker, target, end, hackingLevel0, hackFrac, done
         await workerCall(worker, "sleep", initialWait);
 
     // 2. Adjust for hacking level changes
-// =============================== original line ===============================
-/**
- *     const hackTime1 = Math.round(ns.getHackTime(target) * 1000);
- */
-// =============================================================================
+    // =============================== original line ===============================
+    /**
+     *     const hackTime1 = Math.round(ns.getHackTime(target) * 1000);
+     */
+    // =============================================================================
     //const hackTime1 = Math.round(((...a)=>ns.getHackTime(...a)/1000)(target) * 1000);
     const hackTime1 = ns.getHackTime(target);
     const extraWait = end - performance.now() - hackTime1;
@@ -323,12 +325,12 @@ async function hackDriver(ns, worker, target, end, hackingLevel0, hackFrac, done
 
     let threads = worker.spec.threads;
     if (hackingLevel0 != ns.getHackingLevel())
-// =============================== original line ===============================
-/**
- *         threads = Math.min(threads, Math.floor(hackFrac / ns.hackAnalyzePercent(target)));
- */
-// =============================================================================
-        threads = Math.min(threads, Math.floor(hackFrac / ((...a)=>ns.hackAnalyze(...a)*100)(target)));
+        // =============================== original line ===============================
+        /**
+         *         threads = Math.min(threads, Math.floor(hackFrac / ns.hackAnalyzePercent(target)));
+         */
+        // =============================================================================
+        threads = Math.min(threads, Math.floor(hackFrac / ((...a) => ns.hackAnalyze(...a) * 100)(target)));
 
     // 3. Abort if money or security is not right
     if (ns.getServerMoneyAvailable(target) < ns.getServerMaxMoney(target)) {
@@ -344,11 +346,11 @@ async function hackDriver(ns, worker, target, end, hackingLevel0, hackFrac, done
 
     // 4. Run the hack
     //tlog(ns, "DEBUG", "%s-%d@'%s' pre-op, end - now - time: %d", worker.spec.args[0], worker.spec.args[2], target,
-// =============================== original line ===============================
-/**
- *     //    end - performance.now() - Math.round(ns.getHackTime(target) * 1000));
- */
-// =============================================================================
+    // =============================== original line ===============================
+    /**
+     *     //    end - performance.now() - Math.round(ns.getHackTime(target) * 1000));
+     */
+    // =============================================================================
     //    end - performance.now() - Math.round(((...a)=>ns.getHackTime(...a)/1000)(target) * 1000));
     //    end - performance.now() - ns.getHackTime(target));
     await workerCall(worker, "hack", target, { threads: threads });
@@ -363,11 +365,11 @@ async function hackDriver(ns, worker, target, end, hackingLevel0, hackFrac, done
 /** @param {NS} ns **/
 async function growDriver(ns, worker, target, end, dones) {
     // 1. Initial wait
-// =============================== original line ===============================
-/**
- *     const growTime0 = Math.round(ns.getGrowTime(target) * 1000);
- */
-// =============================================================================
+    // =============================== original line ===============================
+    /**
+     *     const growTime0 = Math.round(ns.getGrowTime(target) * 1000);
+     */
+    // =============================================================================
     //const growTime0 = Math.round(((...a)=>ns.getGrowTime(...a)/1000)(target) * 1000);
     const growTime0 = ns.getGrowTime(target);
     const initialWait = end - performance.now() - growTime0;
@@ -377,11 +379,11 @@ async function growDriver(ns, worker, target, end, dones) {
         await workerCall(worker, "sleep", initialWait);
 
     // 2. Adjust for hacking level changes
-// =============================== original line ===============================
-/**
- *     const growTime1 = Math.round(ns.getGrowTime(target) * 1000);
- */
-// =============================================================================
+    // =============================== original line ===============================
+    /**
+     *     const growTime1 = Math.round(ns.getGrowTime(target) * 1000);
+     */
+    // =============================================================================
     //const growTime1 = Math.round(((...a)=>ns.getGrowTime(...a)/1000)(target) * 1000);
     const growTime1 = ns.getGrowTime(target);
     const extraWait = end - performance.now() - growTime1;
@@ -398,11 +400,11 @@ async function growDriver(ns, worker, target, end, dones) {
     }
 
     //tlog(ns, "DEBUG", "%s-%d@'%s' pre-op, end - now - time: %d", worker.spec.args[0], worker.spec.args[2], target,
-// =============================== original line ===============================
-/**
- *     //    end - performance.now() - Math.round(ns.getGrowTime(target) * 1000));
- */
-// =============================================================================
+    // =============================== original line ===============================
+    /**
+     *     //    end - performance.now() - Math.round(ns.getGrowTime(target) * 1000));
+     */
+    // =============================================================================
     //    end - performance.now() - Math.round(((...a)=>ns.getGrowTime(...a)/1000)(target) * 1000));
     //    end - performance.now() - ns.getGrowTime(target));
     await workerCall(worker, "grow", target);
@@ -421,11 +423,11 @@ async function growDriver(ns, worker, target, end, dones) {
 /** @param {NS} ns **/
 async function weakDriver(ns, worker, target, end, dones, doneIx) {
     // 1. Initial wait
-// =============================== original line ===============================
-/**
- *     const weakTime0 = Math.round(ns.getWeakenTime(target) * 1000);
- */
-// =============================================================================
+    // =============================== original line ===============================
+    /**
+     *     const weakTime0 = Math.round(ns.getWeakenTime(target) * 1000);
+     */
+    // =============================================================================
     //const weakTime0 = Math.round(((...a)=>ns.getWeakenTime(...a)/1000)(target) * 1000);
     const weakTime0 = ns.getWeakenTime(target);
     const initialWait = end - performance.now() - weakTime0;
@@ -435,11 +437,11 @@ async function weakDriver(ns, worker, target, end, dones, doneIx) {
         await workerCall(worker, "sleep", initialWait);
 
     // 2. Adjust for hacking level changes
-// =============================== original line ===============================
-/**
- *     const weakTime1 = Math.round(ns.getWeakenTime(target) * 1000);
- */
-// =============================================================================
+    // =============================== original line ===============================
+    /**
+     *     const weakTime1 = Math.round(ns.getWeakenTime(target) * 1000);
+     */
+    // =============================================================================
     //const weakTime1 = Math.round(((...a)=>ns.getWeakenTime(...a)/1000)(target) * 1000);
     const weakTime1 = ns.getWeakenTime(target);
     const extraWait = end - performance.now() - weakTime1;
@@ -454,11 +456,11 @@ async function weakDriver(ns, worker, target, end, dones, doneIx) {
             worker.spec.args[0], worker.spec.args[2], target, ns.getServerSecurityLevel(target));
 
     //tlog(ns, "DEBUG", "%s-%d@'%s' pre-op, end - now - time: %d", worker.spec.args[0], worker.spec.args[2], target,
-// =============================== original line ===============================
-/**
- *     //    end - performance.now() - Math.round(ns.getWeakenTime(target) * 1000));
- */
-// =============================================================================
+    // =============================== original line ===============================
+    /**
+     *     //    end - performance.now() - Math.round(ns.getWeakenTime(target) * 1000));
+     */
+    // =============================================================================
     //    end - performance.now() - Math.round(((...a)=>ns.getWeakenTime(...a)/1000)(target) * 1000));
     //    end - performance.now() - ns.getWeakenTime(target));
     await workerCall(worker, "weaken", target);
@@ -503,11 +505,11 @@ async function findBestConfiguration(ns, servers) {
     // operations.
     // TODO: these need a different kind of control scheme
     servers = servers.filter(server => {
-// =============================== original line ===============================
-/**
- *         const hackTime = Math.round(ns.getHackTime(server) * 1000);
- */
-// =============================================================================
+        // =============================== original line ===============================
+        /**
+         *         const hackTime = Math.round(ns.getHackTime(server) * 1000);
+         */
+        // =============================================================================
         //const hackTime = Math.round(((...a)=>ns.getHackTime(...a)/1000)(server) * 1000);
         const hackTime = ns.getHackTime(server);
         if (hackTime < 4 * OPERATION_UNCERTAINTY) {
@@ -548,38 +550,38 @@ function findBestRemainingConfiguration(ns, ram0, servers) {
     let bestFit = null;
 
     for (const target of servers) {
-// =============================== original line ===============================
-/**
- *         const hackPercent = ns.hackAnalyzePercent(target);
- */
-// =============================================================================
-        const hackPercent = ((...a)=>ns.hackAnalyze(...a)*100)(target);
-// =============================== original line ===============================
-/**
- *         const hackChance = ns.hackChance(target);
- */
-// =============================================================================
+        // =============================== original line ===============================
+        /**
+         *         const hackPercent = ns.hackAnalyzePercent(target);
+         */
+        // =============================================================================
+        const hackPercent = ((...a) => ns.hackAnalyze(...a) * 100)(target);
+        // =============================== original line ===============================
+        /**
+         *         const hackChance = ns.hackChance(target);
+         */
+        // =============================================================================
         const hackChance = ns.hackAnalyzeChance(target);
         const maxMoney = ns.getServerMaxMoney(target);
-// =============================== original line ===============================
-/**
- *         const hackTime = Math.round(ns.getHackTime(target) * 1000);
- */
-// =============================================================================
+        // =============================== original line ===============================
+        /**
+         *         const hackTime = Math.round(ns.getHackTime(target) * 1000);
+         */
+        // =============================================================================
         //const hackTime = Math.round(((...a)=>ns.getHackTime(...a)/1000)(target) * 1000);
         const hackTime = ns.getHackTime(target);
-// =============================== original line ===============================
-/**
- *         const growTime = Math.round(ns.getGrowTime(target) * 1000);
- */
-// =============================================================================
+        // =============================== original line ===============================
+        /**
+         *         const growTime = Math.round(ns.getGrowTime(target) * 1000);
+         */
+        // =============================================================================
         //const growTime = Math.round(((...a)=>ns.getGrowTime(...a)/1000)(target) * 1000);
         const growTime = ns.getGrowTime(target);
-// =============================== original line ===============================
-/**
- *         const weakTime = Math.round(ns.getWeakenTime(target) * 1000);
- */
-// =============================================================================
+        // =============================== original line ===============================
+        /**
+         *         const weakTime = Math.round(ns.getWeakenTime(target) * 1000);
+         */
+        // =============================================================================
         //const weakTime = Math.round(((...a)=>ns.getWeakenTime(...a)/1000)(target) * 1000);
         const weakTime = ns.getWeakenTime(target);
         const maxWorkers = Math.ceil(weakTime * MAX_PACKING / SLICE_TIME);
